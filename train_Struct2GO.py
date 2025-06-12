@@ -6,6 +6,9 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 import pickle
+#from dgl.heterograph import DGLHeteroGraph
+from sklearn.preprocessing import MultiLabelBinarizer
+import dgl
 from model.network import SAGNetworkHierarchical,SAGNetworkGlobal
 import torch.nn as nn
 import torch.optim as optim
@@ -23,6 +26,8 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import precision_recall_curve
 from data_processing.divide_data import MyDataSet
 from model.evaluation import cacul_aupr,calculate_performance
+import os
+
 
 
 warnings.filterwarnings('ignore')
@@ -37,13 +42,15 @@ Thresholds = list(map(lambda x:round(x*0.01,2), list(range(1,100))))
 #     pred_lable = []
 #     actual_label = []
 #     for l in range(len(pred_prob)):
-#         eachline = (np.array(pred_prob[l]) > threshold).astype(np.int)
-#         eachline = eachline.tolist()
-#         pred_lable.append(list(_flatten(eachline)))
+#         eachline = (np.array(pred_prob[l]) > threshold).astype(np.int32)
+#         #eachline = eachline.tolist()
+#         #pred_lable.append(list(_flatten(eachline)))
+#         pred_lable.append(list(eachline))
 #     for l in range(len(actual)):
-#         eachline = (np.array(actual[l])).astype(np.int)
-#         eachline = eachline.tolist()
-#         actual_label.append(list(_flatten(eachline)))
+#         eachline = (np.array(actual[l])).astype(np.int32)
+#         #eachline = eachline.tolist()
+#         #actual_label.append(list(_flatten(eachline)))
+#         actual_label.append(list(eachline))
 #     f_score = f1_score(actual_label, pred_lable, average=average)
 #     recall = recall_score(actual_label, pred_lable, average=average)
 #     precision = precision_score(actual_label,  pred_lable, average=average)
@@ -51,27 +58,41 @@ Thresholds = list(map(lambda x:round(x*0.01,2), list(range(1,100))))
 
 
 if __name__ == "__main__":
-    #参数设置
+    #参数设置 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-batch_size', '--batch_size', type=int, default=1,  help="the number of the bach size")
+    parser.add_argument('-batch_size', '--batch_size', type=int, default=128,help="the number of the bach size") #hmmm
     parser.add_argument('-learningrate', '--learningrate',type=float,default=5e-4)
     parser.add_argument('-dropout', '--dropout',type=float,default=0.45)
-    parser.add_argument('-train_data', '--train_data',type=str,default='/home/jiaops/lyjps/divided_data/mf_train_dataset')
-    parser.add_argument('-valid_data', '--valid_data',type=str,default='/home/jiaops/lyjps/divided_data/mf_valid_dataset')
+    parser.add_argument('-train_data', '--train_data',type=str,default="train_dataset_new.pkl")
+    parser.add_argument('-valid_data', '--valid_data',type=str,default="vald_dataset_new.pkl")
     parser.add_argument('-branch', '--branch',type=str,default='mf')
     parser.add_argument('-labels_num', '--labels_num',type=int,default=273)
-    parser.add_argument('-label_network', '--label_network', type=str, default='/home/jiaops/lyjps/processed_data/label_mf_network ')
+    parser.add_argument('-label_network', '--label_network', type=str, default="label_network.dgl")
 
     args = parser.parse_args()
 
-    with open(args.train_data,'rb')as f:
-        train_dataset = pickle.load(f)
-    with open(args.valid_data,'rb')as f:
-        valid_dataset = pickle.load(f)
-    with open(args.label_network,'rb')as f:
-        label_network=pickle.load(f)
 
-        
+    class DGLSafeUnpickler(pickle.Unpickler):
+        def find_class(self, module, name):
+            if name == 'DGLHeteroGraph':
+                return dgl.DGLGraph  # for older DGL versions
+            return super().find_class(module, name) 
+    
+
+    with open(args.train_data,'rb')as f:
+        train_dataset = DGLSafeUnpickler(f).load()
+        print("HERE:", type(train_dataset))
+        #dgl.save_graphs("train_dataset.dgl", [train_dataset])
+
+    with open(args.valid_data,'rb')as f:
+        valid_dataset = DGLSafeUnpickler(f).load()
+        #dgl.save_graphs("valid_dataset.dgl", [valid_dataset])
+
+    with open(args.label_network,'rb')as f:
+        label_network, _ = dgl.load_graphs(args.label_network)
+        label_network = label_network[0]
+        print(type(label_network))
+
 
     # class MyDataSet(Dataset):
     #     def __init__(self,emb_graph,emb_seq_feature,emb_label):
@@ -97,7 +118,8 @@ if __name__ == "__main__":
     dropout = args.dropout
 
     # dataset = MyDataSet(emb_graph = emb_graph,emb_seq_feature = emb_seq_feature,emb_label = emb_label)
-    # train_size = int(len(dataset) * 0.8)
+    train_size = int(len(train_dataset) * 0.8)
+    print(train_size)
     # test_size = len(dataset) - train_size
     # #trash_size = len(dataset) - train_size - test_size
     # train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
@@ -109,13 +131,17 @@ if __name__ == "__main__":
     print('#########'+args.branch+'###########')
     print('########start training###########')
     labels_num = args.labels_num
-    #num_convs_nums = [1,2,3,4]
-    #plt.figure("P-R Curve")
-    #plt.xlabel('Recall')
-    #plt.ylabel('Precision')
-    #print("num_convs")
-    #for num_convs in num_convs_nums:
-        #print(num_convs)
+
+    #Commented out
+    num_convs_nums = [1,2,3,4]
+    plt.figure("P-R Curve")
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    print("num_convs")           
+    for num_convs in num_convs_nums:
+        print(num_convs) 
+    #
+    
     model = SAGNetworkHierarchical(56,512,labels_num,num_convs=2,pool_ratio=0.75,dropout=dropout).to('cuda')
     #model = SAGNetworkGlobal(56,512,labels_num,dropout=dropout).to('cuda')
     #optimizer = optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-4)
@@ -126,16 +152,26 @@ if __name__ == "__main__":
     best_scores = []
     best_score_dict = {}
 
-
     for epoch in range(5):
+
+
+        print("started epoch")
         model.train()
         _loss = 0
         batch_num = 0
         train_pred = []
         train_actual = []
+        i=0
         for batched_graph, labels,sequence_feature in dataloader:
+            print("In the for batched loop")
             logits = model(batched_graph.to('cuda'),sequence_feature.to('cuda'),label_network.to('cuda'))
             labels = torch.reshape(labels,(-1,labels_num))
+
+            print(f"DEBUG: Shape of model output (logits): {logits.shape}")
+            print(f"DEBUG: Shape of labels tensor: {labels.shape}")
+            print(f"DEBUG: Number of individual graphs in DGL batch: {batched_graph.batch_size}") # Important!
+            print(f"DEBUG: Total number of nodes in DGL batch: {batched_graph.num_nodes()}")
+
             loss = F.cross_entropy(logits,labels.to('cuda'))
             # F.binary_cross_entropy()
             #loss = F.binary_cross_entropy(logits,labels.to('cuda'))
@@ -146,7 +182,13 @@ if __name__ == "__main__":
             batch_num += 1
             train_pred.append(torch.sigmoid(logits).tolist())
             train_actual.append(labels.tolist())
-        epoch_loss = "{}".format(_loss / batch_num)
+            i+=1
+        print(i)
+        epoch_loss = "Epoch Loss: {}".format(_loss / batch_num)
+        print(epoch_loss)
+
+
+
         # fpr, tpr, th = roc_curve(np.array(train_actual).flatten(), np.array(train_pred).flatten(), pos_label=1)
         # auc_score = auc(fpr, tpr)
         # aupr=cacul_aupr(np.array(train_actual).flatten(), np.array(train_pred).flatten())
@@ -179,43 +221,79 @@ if __name__ == "__main__":
         pred = []
         actual = []
         model.eval()
-        for batched_graph, labels,sequence_feature  in dataloader:
-            logits = model(batched_graph.to('cuda'),sequence_feature.to('cuda'),label_network.to('cuda'))
-            labels = torch.reshape(labels,(-1,labels_num))
-            loss = F.cross_entropy(logits,labels.to('cuda'))
-            #loss = F.binary_cross_entropy(logits,labels.to('cuda'))
-            t_loss += loss.item()
-            valid_batch_num += 1
-            pred.append(torch.sigmoid(logits).tolist())
-            actual.append(labels.tolist())
-            #writer.add_pr_curve('pr_curve',labels,logits,0)
-        test_loss = "{}".format(t_loss / valid_batch_num)    
-        #writer.add_scalar('test/loss',test_loss,epoch)
-        fpr, tpr, th = roc_curve(np.array(actual).flatten(), np.array(pred).flatten(), pos_label=1)
-        auc_score = auc(fpr, tpr)
-        aupr=cacul_aupr(np.array(actual).flatten(), np.array(pred).flatten())
-        score_dict = {}
-        each_best_fcore = 0
-        #best_fscore = 0
-        each_best_scores = []
-        #writer.add_pr_curve('pr_curve',actual,pred,0,num_thresholds=labels_num)
-        for i in range(len(Thresholds)):
-            f_score,precision, recall  = calculate_performance(actual, pred, label_network,threshold=Thresholds[i])
-            if f_score >= each_best_fcore:
-                each_best_fcore = f_score
-                each_best_scores = [Thresholds[i], f_score, recall, precision, auc_score]
-                scores = [f_score, recall, precision, auc_score]
-                score_dict[Thresholds[i]] = scores
-        if each_best_fcore >= best_fscore:
-            best_fscore = each_best_fcore
-            best_scores = each_best_scores
-            best_score_dict = score_dict
-            torch.save(model, '/home/jiaops/lyjps/save_models/mymodel_{}_{}_{}_{}.pkl'.format(args.branch,batch_size,learningrate,dropout))
-        t, f_score, recall = each_best_scores[0], each_best_scores[1], each_best_scores[2]
-        precision, auc_score = each_best_scores[3], each_best_scores[4] 
-        print('########valid metric###########')
-        print('epoch{},loss{},testloss:{},t:{},f_score{}, auc{}, recall{}, precision{},aupr{}'.format(
-                epoch, epoch_loss, test_loss, t, f_score, auc_score, recall, precision,aupr))
+        print("This place?")
+
+        all_preds_tensors = []
+        all_actuals_tensors = []
+
+        with torch.no_grad():
+            """
+            for batched_graph, labels,sequence_feature  in dataloader:
+                print("Running validation")
+                logits = model(batched_graph.to('cuda'),sequence_feature.to('cuda'),label_network.to('cuda'))
+                labels = torch.reshape(labels,(-1,labels_num))
+                loss = F.cross_entropy(logits,labels.to('cuda'))
+                #loss = F.binary_cross_entropy(logits,labels.to('cuda'))
+                t_loss += loss.item()
+                valid_batch_num += 1
+                all_preds_tensors.append(torch.sigmoid(logits).cpu())
+                all_actuals_tensors.append(labels.cpu())
+                #writer.add_pr_curve('pr_curve',labels,logits,0)
+
+            final_preds_tensor = torch.cat(all_preds_tensors, dim=0)
+            final_actuals_tensor = torch.cat(all_actuals_tensors, dim=0)
+            actual = final_actuals_tensor.numpy()
+            pred = final_preds_tensor.numpy()
+
+            print("pred shape og:", type(pred), len(pred), pred[:5])
+            print("actual shape:", actual.shape)
+            print("unique values in actual:", np.unique(actual))
+
+            test_loss = "{}".format(t_loss / valid_batch_num)    
+            #writer.add_scalar('test/loss',test_loss,epoch)
+            fpr, tpr, th = roc_curve(actual, pred, pos_label=1)
+            auc_score = auc(fpr, tpr)
+            """
+            for batched_graph, labels,sequence_feature  in dataloader:
+                logits = model(batched_graph.to('cuda'),sequence_feature.to('cuda'),label_network.to('cuda'))
+                labels = torch.reshape(labels,(-1,labels_num))
+                loss = F.cross_entropy(logits,labels.to('cuda'))
+                #loss = F.binary_cross_entropy(logits,labels.to('cuda'))
+                t_loss += loss.item()
+                valid_batch_num += 1
+                pred.append(torch.sigmoid(logits).tolist())
+                actual.append(labels.tolist())
+                #writer.add_pr_curve('pr_curve',labels,logits,0)
+            test_loss = "{}".format(t_loss / valid_batch_num)    
+            mlb = MultiLabelBinarizer()
+            actual_binary = mlb.fit_transform(actual)
+            #writer.add_scalar('test/loss',test_loss,epoch)
+            fpr, tpr, th = roc_curve(np.asarray(actual_binary, dtype="object").flatten(), np.asarray(pred, dtype="object").flatten(), pos_label=1)
+            auc_score = auc(fpr, tpr)
+            aupr=cacul_aupr(actual, pred)
+            score_dict = {}
+            each_best_fcore = 0
+            #best_fscore = 0
+            each_best_scores = []
+            #writer.add_pr_curve('pr_curve',actual,pred,0,num_thresholds=labels_num)
+            for i in range(len(Thresholds)):
+
+                f_score,precision, recall  = calculate_performance(actual, pred, label_network,threshold=Thresholds[i])
+                if f_score >= each_best_fcore:
+                    each_best_fcore = f_score
+                    each_best_scores = [Thresholds[i], f_score, recall, precision, auc_score]
+                    scores = [f_score, recall, precision, auc_score]
+                    score_dict[Thresholds[i]] = scores
+            if each_best_fcore >= best_fscore:
+                best_fscore = each_best_fcore
+                best_scores = each_best_scores
+                best_score_dict = score_dict
+                #torch.save(model, "C:/Users/ayaan/Downloads/Struct2GO-master/Struct2GO-master/save_models/_{}_{}_{}_{}.pkl".format(args.branch,batch_size,learningrate,dropout))
+            t, f_score, recall = each_best_scores[0], each_best_scores[1], each_best_scores[2]
+            precision, auc_score = each_best_scores[3], each_best_scores[4] 
+            print('########valid metric###########')
+            print('epoch{},loss{},testloss:{},t:{},f_score{}, auc{}, recall{}, precision{},aupr{}'.format(
+                    epoch, epoch_loss, test_loss, t, f_score, auc_score, recall, precision,aupr))
         #precision, recall, thresholds = precision_recall_curve(np.array(actual).flatten(), np.array(pred).flatten())
         #plt.plot(recall,precision,label = "num_convs="+str(num_convs))
 
