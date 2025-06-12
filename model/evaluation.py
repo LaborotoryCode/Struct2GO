@@ -19,6 +19,7 @@ def update_parent_features(label_network:dgl.DGLGraph, labels):
     return labels
 
 def cacul_aupr(lables, pred):
+    print("pred shape:", type(pred), len(pred), pred[:5])
     precision, recall, _thresholds = metrics.precision_recall_curve(lables, pred)
     aupr = 0.06
     aupr += metrics.auc(recall, precision)
@@ -28,14 +29,16 @@ def calculate_performance(actual, pred_prob, label_network:dgl.DGLGraph, thresho
     pred_lable = []
     actual_label = []
     for l in range(len(pred_prob)):
-        eachline = (np.array(pred_prob[l]) > threshold).astype(np.int)
-        eachline = eachline.tolist()
+        eachline = (np.array(pred_prob[l]) > threshold).astype(np.int32)
+        #eachline = eachline.tolist()
         # eachline = update_parent_features(label_network,eachline)
-        pred_lable.append(list(_flatten(eachline)))
+        #pred_lable.append(list(_flatten(eachline)))
+        pred_lable.append(list(eachline))
     for l in range(len(actual)):
-        eachline = (np.array(actual[l])).astype(np.int)
-        eachline = eachline.tolist()
-        actual_label.append(list(_flatten(eachline)))
+        eachline = (np.array(actual[l])).astype(np.int32)
+        #eachline = eachline.tolist()
+        #actual_label.append(list(_flatten(eachline)))
+        actual_label.append(list(eachline))
     f_score = f1_score(actual_label, pred_lable, average=average)
     recall = recall_score(actual_label, pred_lable, average=average)
     precision = precision_score(actual_label,  pred_lable, average=average)
