@@ -26,8 +26,10 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import precision_recall_curve
 from data_processing.divide_data import MyDataSet
 from model.evaluation import cacul_aupr,calculate_performance
-import os
-
+import io
+import requests
+from Bio.PDB import PDBParser
+from collections import OrderedDict
 
 
 warnings.filterwarnings('ignore')
@@ -63,13 +65,32 @@ if __name__ == "__main__":
     parser.add_argument('-batch_size', '--batch_size', type=int, default=128,help="the number of the bach size") #hmmm
     parser.add_argument('-learningrate', '--learningrate',type=float,default=5e-4)
     parser.add_argument('-dropout', '--dropout',type=float,default=0.45)
-    parser.add_argument('-train_data', '--train_data',type=str,default="train_dataset_new.pkl")
-    parser.add_argument('-valid_data', '--valid_data',type=str,default="vald_dataset_new.pkl")
+    parser.add_argument('-train_data', '--train_data',type=str,default="train_plddt.pkl")
+    parser.add_argument('-valid_data', '--valid_data',type=str,default="valid_plddt.pkl")
     parser.add_argument('-branch', '--branch',type=str,default='mf')
     parser.add_argument('-labels_num', '--labels_num',type=int,default=273)
     parser.add_argument('-label_network', '--label_network', type=str, default="label_network.dgl")
 
     args = parser.parse_args()
+
+    e = 0
+
+    #Adding plddt structures for confidence awareness in predictions
+    def get_alphafold_plddt(uniprot_id): #TRY CHANGING DEFAULT
+        parser = PDBParser(QUIET=True)
+
+        url = f"https://alphafold.ebi.ac.uk/files/AF-{uniprot_id}-F1-model_v4.pdb"
+        response = requests.get(url)
+
+        plddts = []
+
+        for line in response.text.splitlines():
+            if line.startswith("ATOM") and line[12:16].strip() == "CA":
+                plddts.append(float(line[60:66]))
+        
+        #residue_plddt = [np.mean(plddts[i:i+4]) for i in range(0, len(plddts), 4)] #Aggregate pooling of plddts
+
+        return plddts
 
 
     class DGLSafeUnpickler(pickle.Unpickler):
@@ -77,15 +98,13 @@ if __name__ == "__main__":
             if name == 'DGLHeteroGraph':
                 return dgl.DGLGraph  # for older DGL versions
             return super().find_class(module, name) 
-    
 
     with open(args.train_data,'rb')as f:
         train_dataset = DGLSafeUnpickler(f).load()
-        print("HERE:", type(train_dataset))
-        #dgl.save_graphs("train_dataset.dgl", [train_dataset])
 
     with open(args.valid_data,'rb')as f:
         valid_dataset = DGLSafeUnpickler(f).load()
+    
         #dgl.save_graphs("valid_dataset.dgl", [valid_dataset])
 
     with open(args.label_network,'rb')as f:
@@ -118,8 +137,8 @@ if __name__ == "__main__":
     dropout = args.dropout
 
     # dataset = MyDataSet(emb_graph = emb_graph,emb_seq_feature = emb_seq_feature,emb_label = emb_label)
-    train_size = int(len(train_dataset) * 0.8)
-    print(train_size)
+    #train_size = int(len(train_dataset) * 0.8)
+    #print(train_size)
     # test_size = len(dataset) - train_size
     # #trash_size = len(dataset) - train_size - test_size
     # train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
@@ -152,8 +171,12 @@ if __name__ == "__main__":
     best_scores = []
     best_score_dict = {}
 
-    for epoch in range(5):
+    loss_history = []
+    i=1
 
+    for epoch in range(10): #Always gives you one less epoch for some reason
+
+        i+=1
 
         print("started epoch")
         model.train()
@@ -161,7 +184,7 @@ if __name__ == "__main__":
         batch_num = 0
         train_pred = []
         train_actual = []
-        i=0
+
         for batched_graph, labels,sequence_feature in dataloader:
             print("In the for batched loop")
             logits = model(batched_graph.to('cuda'),sequence_feature.to('cuda'),label_network.to('cuda'))
@@ -185,8 +208,8 @@ if __name__ == "__main__":
             i+=1
         print(i)
         epoch_loss = "Epoch Loss: {}".format(_loss / batch_num)
+        loss_history.append(epoch_loss)
         print(epoch_loss)
-
 
 
         # fpr, tpr, th = roc_curve(np.array(train_actual).flatten(), np.array(train_pred).flatten(), pos_label=1)
@@ -265,20 +288,21 @@ if __name__ == "__main__":
                 actual.append(labels.tolist())
                 #writer.add_pr_curve('pr_curve',labels,logits,0)
             test_loss = "{}".format(t_loss / valid_batch_num)    
-            mlb = MultiLabelBinarizer()
-            actual_binary = mlb.fit_transform(actual)
+            #mlb = MultiLabelBinarizer()
+            #print(actual[0])
+            #actual_binary = mlb.fit_transform(actual)
             #writer.add_scalar('test/loss',test_loss,epoch)
-            fpr, tpr, th = roc_curve(np.asarray(actual_binary, dtype="object").flatten(), np.asarray(pred, dtype="object").flatten(), pos_label=1)
+            fpr, tpr, th = roc_curve(np.vstack(actual).flatten(), np.vstack(pred).flatten(), pos_label=1)
             auc_score = auc(fpr, tpr)
-            aupr=cacul_aupr(actual, pred)
+            aupr=cacul_aupr(np.vstack(actual).flatten(), np.vstack(pred).flatten())
             score_dict = {}
             each_best_fcore = 0
             #best_fscore = 0
             each_best_scores = []
             #writer.add_pr_curve('pr_curve',actual,pred,0,num_thresholds=labels_num)
-            for i in range(len(Thresholds)):
 
-                f_score,precision, recall  = calculate_performance(actual, pred, label_network,threshold=Thresholds[i])
+            for i in range(0, len(Thresholds),3):
+                f_score,precision, recall  = calculate_performance(np.vstack(actual), np.vstack(pred), label_network,threshold=Thresholds[i])
                 if f_score >= each_best_fcore:
                     each_best_fcore = f_score
                     each_best_scores = [Thresholds[i], f_score, recall, precision, auc_score]
@@ -292,10 +316,10 @@ if __name__ == "__main__":
             t, f_score, recall = each_best_scores[0], each_best_scores[1], each_best_scores[2]
             precision, auc_score = each_best_scores[3], each_best_scores[4] 
             print('########valid metric###########')
-            print('epoch{},loss{},testloss:{},t:{},f_score{}, auc{}, recall{}, precision{},aupr{}'.format(
+            print('epoch{},loss{},testloss:{},t:{},f_score={}, auc={}, recall={}, precision={},aupr={}'.format(
                     epoch, epoch_loss, test_loss, t, f_score, auc_score, recall, precision,aupr))
         #precision, recall, thresholds = precision_recall_curve(np.array(actual).flatten(), np.array(pred).flatten())
-        #plt.plot(recall,precision,label = "num_convs="+str(num_convs))
+            plt.plot(recall,precision,label = "num_convs="+str(num_convs))
 
     #plt.legend()
     #plt.savefig('/home/jiaops/lyjps/processed_data/pr_num_convs.jpg')       
@@ -304,3 +328,12 @@ if __name__ == "__main__":
         #auc_score = auc(fpr, tpr)
         #f_score,precision, recall  = calculate_performance(actual, pred)
         #print('f_score{},precision{},recall{}'.format(f_score,precision, recall))
+
+    plt.plot(loss_history, label="Epoch Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Validation Loss over Epoch")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("val_loss_plot.png")
+    plt.show()
