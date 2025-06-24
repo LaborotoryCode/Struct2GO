@@ -23,6 +23,12 @@ class SAGNetworkHierarchical(torch.nn.Module):
                  pool_ratio:float=0.5, dropout:float=0.5):
         super(SAGNetworkHierarchical, self).__init__()
 
+
+        self.struct_proj = torch.nn.Linear(1024, hid_dim)
+        self.seq_proj = torch.nn.Linear(1024, hid_dim) #replace the 128 with your batch size
+        self.fusion_gate = torch.nn.Linear(1,512)
+        self.fusion_proj = torch.nn.Linear(512, 2048)
+
         self.dropout = dropout
         self.num_convpools = num_convs
        #self.classify = torch.nn.Linear(hid_dim, out_dim)
@@ -70,10 +76,20 @@ class SAGNetworkHierarchical(torch.nn.Module):
                 final_readout = readout
             else:
                 final_readout = final_readout + readout
-        final_readout = torch.cat((final_readout,sequence_feature), -1)
+
+        structure_proj = self.struct_proj(final_readout)
+        sequence_proj = self.seq_proj(sequence_feature)
+
+        graph.ndata["plddt"] = graph.ndata["plddt"].float()
+        plddt = dgl.readout_nodes(graph, "plddt", op="mean")
+        alpha = torch.sigmoid(self.fusion_gate(plddt))      # (B, 1)
+        fused = alpha * structure_proj + (1 - alpha) * sequence_proj
+        fused = self.fusion_proj(fused)
+        #final_readout = torch.cat((final_readout,sequence_feature), -1)
         #con_readout = self.transformer_encoder(final_readout)
         #final_readout = torch.cat((sequence_feature,con_readout), -1)
-        feat = F.relu(self.lin1(final_readout))
+
+        feat = F.relu(self.lin1(fused))
         feat = F.dropout(feat, p=self.dropout, training=self.training)
         feat = F.relu(self.lin2(feat))
         #feat = F.log_softmax(self.lin3(feat), dim=-1)
