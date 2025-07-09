@@ -1,8 +1,59 @@
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import dgl
+import dgl.function as fn
 from dgl.nn import GraphConv, AvgPooling, MaxPooling, GATConv,SumPooling,SAGEConv,ChebConv
 from model.utils import topk, get_batch_id
+
+class PLDDTWeightedGAT(torch.nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.fc = nn.Linear(in_dim, out_dim, bias=False)
+        self.attn_fc = nn.Parameter(torch.empty(size=(2 * out_dim, 1)))
+        nn.init.xavier_uniform_(self.attn_fc.data, gain=1.414)
+        # self.W = nn.Linear(in_dim, out_dim, bias=False)
+        # self.attn = nn.Parameter(torch.empty(size=(2 * out_dim, 1)))
+        #nn.init.xavier_uniform_(self.attn.data, gain=1.414) #Cuz why not
+
+    # def edge_attention(self, edges):
+    #     z2 = torch.cat([edges.src['z'], edges.dst['z']], dim=1)
+    #     alpha = F.leaky_relu((z2 @ self.attn).squeeze(-1))
+    #     weight = edges.data['weight'].squeeze(-1)
+    #     alpha = alpha * weight.float()
+    #     return{'e': alpha}
+    
+    # def message_func(self, edges):
+    #     return {'z': edges.src['z'], 'e': edges.data['e']}
+    
+    # def reduce_func(self, nodes):
+    #     attn = F.softmax(nodes.mailbox['e'], dim=1).unsqueeze(-1)
+    #     h = torch.sum(attn * nodes.mailbox['z'], dim=1)
+    #     return {'h': h}
+    
+    def forward(self, graph, features):
+        
+        graph = graph.local_var()
+        h = self.fc(features)
+        graph.ndata['h'] = h
+
+        graph.apply_edges(lambda edges: {
+            'e': F.leaky_relu(torch.matmul(torch.cat([edges.src['h'], edges.dst['h']], dim=1), self.attn_fc).squeeze(-1) * edges.data['weight'].squeeze(-1))
+        })
+
+        graph.edata['a'] = dgl.ops.edge_softmax(graph, graph.edata['e'])
+
+        graph.update_all(
+            fn.u_mul_e("h", "a", "m"), fn.sum("m", "h")
+        )
+
+        # graph = graph.local_var()
+        # z = self.W(features)
+        # graph.ndata['z'] = z
+        # graph.apply_edges(self.edge_attention)
+        # graph.update_all(self.message_func, self.reduce_func)
+
+        return graph.ndata['h']
 
 class SAGPool(torch.nn.Module):
     """The Self-Attention Pooling layer in paper 
