@@ -3,7 +3,7 @@ import torch.nn
 import torch.nn.functional as F
 import dgl
 from dgl.nn import GraphConv,GATConv, AvgPooling, MaxPooling
-from model.layer import ConvPoolBlock, SAGPool
+from model.layer import ConvPoolBlock, SAGPool, PLDDTWeightedGAT
 
 
 class SAGNetworkHierarchical(torch.nn.Module):
@@ -23,21 +23,27 @@ class SAGNetworkHierarchical(torch.nn.Module):
                  pool_ratio:float=0.5, dropout:float=0.5):
         super(SAGNetworkHierarchical, self).__init__()
 
-
-        self.struct_proj = torch.nn.Linear(1024, hid_dim)
-        self.seq_proj = torch.nn.Linear(1024, hid_dim) #replace the 128 with your batch size
-        self.fusion_gate = torch.nn.Linear(1,512)
-        self.fusion_proj = torch.nn.Linear(512, 2048)
+        self.convpools = torch.nn.ModuleList()
 
         self.dropout = dropout
         self.num_convpools = num_convs
        #self.classify = torch.nn.Linear(hid_dim, out_dim)
-        convpools = []
+        #convpools = []
+
+        #Apply pLDDT before pooling
         for i in range(num_convs):
-            _i_dim = in_dim if i == 0 else hid_dim
-            _o_dim = hid_dim
-            convpools.append(ConvPoolBlock(_i_dim, _o_dim, pool_ratio=pool_ratio))
-        self.convpools = torch.nn.ModuleList(convpools)
+            if i == 0:
+                self.convpools.append(PLDDTWeightedGAT(in_dim, hid_dim))
+            else:
+                self.convpools.append(ConvPoolBlock(hid_dim, hid_dim, pool_ratio=pool_ratio))
+
+        #Normal
+        # for i in range(num_convs):
+        #     _i_dim = in_dim if i == 0 else hid_dim
+        #     _o_dim = hid_dim
+        #     convpools.append(ConvPoolBlock(_i_dim, _o_dim, pool_ratio=pool_ratio))
+
+        #self.convpools = torch.nn.ModuleList(convpools)
         self.transformer_encoder = torch.nn.TransformerEncoder(
             torch.nn.TransformerEncoderLayer(hid_dim * 2 + 1024, nhead=8), num_layers=6)    
         self.lin1 = torch.nn.Linear(hid_dim * 2 + 1024, hid_dim * 2)
@@ -45,7 +51,7 @@ class SAGNetworkHierarchical(torch.nn.Module):
         #self.lin1 = torch.nn.Linear(1024,hid_dim)
         self.lin2 = torch.nn.Linear(hid_dim*2, hid_dim)
         self.lin3 = torch.nn.Linear(hid_dim, out_dim)
-        self.label_network1 = GATConv(128,1,num_heads=8,allow_zero_in_degree=True)
+        self.label_network1 = GATConv(64,1,num_heads=8,allow_zero_in_degree=True)
 
         self.line_new = torch.nn.Linear(hid_dim * 2 + 1024, out_dim)
 
@@ -70,26 +76,44 @@ class SAGNetworkHierarchical(torch.nn.Module):
         feat = graph.ndata["feature"]
         final_readout = None
 
+        #Before pooling
         for i in range(self.num_convpools):
-            graph, feat, readout = self.convpools[i](graph, feat)
-            if final_readout is None:
-                final_readout = readout
+            if i == 0:
+                src, dst = graph.edges()
+                graph.edata['weight'] = (
+                    (graph.ndata['plddt'][src] + graph.ndata["plddt"][dst]) / 2.0
+                ).float()
+                feat = self.convpools[i](graph, feat)
             else:
-                final_readout = final_readout + readout
+                graph, feat, readout = self.convpools[i](graph, feat)
+                if final_readout is None:
+                    final_readout = readout
+                else:
+                    final_readout = final_readout + readout
 
-        structure_proj = self.struct_proj(final_readout)
-        sequence_proj = self.seq_proj(sequence_feature)
+        #Normal
+        # for i in range(self.num_convpools):
+        #     graph, feat, readout = self.convpools[i](graph, feat)
+        #     if final_readout is None:
+        #         final_readout = readout
+        #     else:
+        #         final_readout = final_readout + readout
 
-        graph.ndata["plddt"] = graph.ndata["plddt"].float()
-        plddt = dgl.readout_nodes(graph, "plddt", op="mean")
-        alpha = torch.sigmoid(self.fusion_gate(plddt))      # (B, 1)
-        fused = alpha * structure_proj + (1 - alpha) * sequence_proj
-        fused = self.fusion_proj(fused)
-        #final_readout = torch.cat((final_readout,sequence_feature), -1)
-        #con_readout = self.transformer_encoder(final_readout)
-        #final_readout = torch.cat((sequence_feature,con_readout), -1)
+        final_readout = torch.cat((final_readout, sequence_feature), -1)
+    
+        # structure_proj = self.struct_proj(final_readout)
+        # sequence_proj = self.seq_proj(sequence_feature)
 
-        feat = F.relu(self.lin1(fused))
+        # graph.ndata["plddt"] = graph.ndata["plddt"].float()
+        # plddt = dgl.readout_nodes(graph, "plddt", op="mean")
+        # alpha = torch.sigmoid(self.fusion_gate(plddt))      # (B, 1)
+        # fused = alpha * structure_proj + (1 - alpha) * sequence_proj
+        # fused = self.fusion_proj(fused)
+        # #final_readout = torch.cat((final_readout,sequence_feature), -1)
+        # #con_readout = self.transformer_encoder(final_readout)
+        # #final_readout = torch.cat((sequence_feature,con_readout), -1)
+
+        feat = F.relu(self.lin1(final_readout))
         feat = F.dropout(feat, p=self.dropout, training=self.training)
         feat = F.relu(self.lin2(feat))
         #feat = F.log_softmax(self.lin3(feat), dim=-1)
