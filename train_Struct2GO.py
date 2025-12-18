@@ -30,6 +30,7 @@ import requests
 from Bio.PDB import PDBParser
 from collections import OrderedDict
 import importlib
+from torch.utils.data import Subset, random_split
 
 
 warnings.filterwarnings('ignore')
@@ -66,9 +67,9 @@ if __name__ == "__main__":
     parser.add_argument('--network_file', type=str, default='network', help='File name to import network from')
     parser.add_argument('-learningrate', '--learningrate',type=float,default=5e-4)
     parser.add_argument('-dropout', '--dropout',type=float,default=0.45)
-    parser.add_argument('-train_data', '--train_data',type=str,default="mf_train_plddt.pkl")
+    parser.add_argument('-train_data', '--train_data',type=str,default="divided_data/bp_train_dataset")
     parser.add_argument('-valid_data', '--valid_data',type=str,default="mf_valid_plddt.pkl")
-    parser.add_argument('-branch', '--branch',type=str,default='mf')
+    parser.add_argument('-branch', '--branch',type=str,default='bp')
     parser.add_argument('-labels_num', '--labels_num',type=int,default=273)
     parser.add_argument('-label_network', '--label_network', type=str, default="mf_label_network.dgl")
 
@@ -78,23 +79,6 @@ if __name__ == "__main__":
     SAGNetworkGlobal = network_file.SAGNetworkGlobal
 
     e = 0
-
-    #Adding plddt structures for confidence awareness in predictions
-    def get_alphafold_plddt(uniprot_id): #TRY CHANGING DEFAULT
-        parser = PDBParser(QUIET=True)
-
-        url = f"https://alphafold.ebi.ac.uk/files/AF-{uniprot_id}-F1-model_v4.pdb"
-        response = requests.get(url)
-
-        plddts = []
-
-        for line in response.text.splitlines():
-            if line.startswith("ATOM") and line[12:16].strip() == "CA":
-                plddts.append(float(line[60:66]))
-        
-        #residue_plddt = [np.mean(plddts[i:i+4]) for i in range(0, len(plddts), 4)] #Aggregate pooling of plddts
-
-        return plddts
 
 
     class DGLSafeUnpickler(pickle.Unpickler):
@@ -115,6 +99,97 @@ if __name__ == "__main__":
         label_network, _ = dgl.load_graphs(args.label_network)
         label_network = label_network[0]
         print(type(label_network))
+
+
+    ###START###
+
+    # Function to fetch pLDDT scores for a given UniProt ID
+    def get_alphafold_plddt(uniprot_id):
+        """
+        Fetch per-residue pLDDT scores from AlphaFold JSON (confidenceScore field).
+        Returns a list of floats.
+        """
+        url = f"https://alphafold.ebi.ac.uk/files/AF-{uniprot_id}-F1-confidence_v6.json"
+        try:
+            response = requests.get(url)
+            if response.status_code != 200:
+                print(f"[ERROR] Failed to get {uniprot_id}: {response.status_code}")
+                return []
+
+            data = response.json()
+            if "confidenceScore" in data:
+                return data["confidenceScore"]
+            else:
+                print(f"[ERROR] 'confidenceScore' key not found in JSON for {uniprot_id}")
+                return []
+
+        except Exception as e:
+            print(f"[ERROR] Exception for {uniprot_id}: {e}")
+            return []
+
+    parent = train_dataset.dataset if hasattr(train_dataset, "dataset") else train_dataset
+    subset_indices = train_dataset.indices if hasattr(train_dataset, "indices") else range(len(train_dataset))
+
+    
+    missing_count = 0
+    updated_graphs = []
+
+    for i in range(len(train_dataset)):
+        print(f"Processing {i+1}/{len(train_dataset)}")
+
+        graph, label, sequence = train_dataset[i]
+        protein_id = parent.list[subset_indices[i]]
+        print("try", protein_id)
+
+        plddt = get_alphafold_plddt(protein_id)
+        #print("plddt", plddt)
+        num_nodes = graph.number_of_nodes()
+
+        if len(plddt) > 0:
+            plddt_tensor = torch.tensor(plddt[:num_nodes], dtype=torch.float32).unsqueeze(-1)
+            if len(plddt_tensor) < num_nodes:
+                pad_len = num_nodes - len(plddt_tensor)
+                pad = torch.full((pad_len, 1), 70.0)  # Default confidence
+                plddt_tensor = torch.cat([plddt_tensor, pad], dim=0)
+        else:
+            plddt_tensor = torch.full((num_nodes, 1), 70.0)
+            missing_count += 1
+
+        #print(plddt_tensor)
+        graph.ndata["plddt"] = plddt_tensor
+        updated_graphs.append((graph, label, sequence))
+
+    print(f"Proteins with missing pLDDT: {missing_count}")
+
+    total_len = len(updated_graphs)
+    train_len = int(0.7 * total_len)
+    valid_len = int(0.2 * total_len)
+    test_len = total_len - train_len - valid_len
+
+    torch.manual_seed(42)
+    indices = torch.randperm(total_len)
+
+    train_indices = indices[:train_len].tolist()
+    valid_indices = indices[train_len:train_len+valid_len].tolist()
+    test_indices = indices[train_len+valid_len:].tolist()
+
+    train_dataset = Subset(updated_graphs, train_indices)
+    valid_dataset = Subset(updated_graphs, valid_indices)
+    test_dataset = Subset(updated_graphs, test_indices)
+
+    import pickle
+
+    with open("new_bp_train_plddt.pkl", "wb") as f:
+        pickle.dump(train_dataset, f)
+    with open("new_bp_valid_plddt.pkl", "wb") as f:
+        pickle.dump(valid_dataset, f)
+    with open("new_bp_test_plddt.pkl", "wb") as f:
+        pickle.dump(test_dataset, f)
+
+
+    inp = input("breaker breaker 190")
+    ###END###
+
 
 
     # class MyDataSet(Dataset):
