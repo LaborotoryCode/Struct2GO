@@ -3,7 +3,7 @@ import torch.nn
 import torch.nn.functional as F
 import dgl
 from dgl.nn import GraphConv,GATConv, AvgPooling, MaxPooling
-from model.layer import ConvPoolBlock, SAGPool
+from model.layer import ConvPoolBlock, SAGPool, PLDDTWeightedGAT
 from model.fusion import CrossAttentionFusion 
 
 
@@ -26,26 +26,39 @@ class SAGNetworkHierarchical(torch.nn.Module):
 
         #Feature fusion
         print("hid", hid_dim)
+
         self.cross_attn = CrossAttentionFusion(d_model=1024, dropout=dropout)#??
         self.seq_proj = torch.nn.Linear(1024, hid_dim)
-        self.struct_proj = torch.nn.Linear(512, 1024) #You can change the 64
+        self.struct_proj = torch.nn.Linear(1024, hid_dim) #You can change the 64
+        self.fusion_gate = torch.nn.Linear(1, hid_dim)
+
+        convpools = []
 
         self.dropout = dropout
-        self.num_convpools = num_convs
+        self.num_convpools = num_convs+1 
+        #Because of the new GAT, for the same number of convs this needs to be +1
        #self.classify = torch.nn.Linear(hid_dim, out_dim)
-        convpools = []
-        for i in range(num_convs):
-            _i_dim = in_dim if i == 0 else hid_dim
-            _o_dim = hid_dim
-            convpools.append(ConvPoolBlock(_i_dim, _o_dim, pool_ratio=pool_ratio))
+
+        #Apply pLDDT before pooling
+        for i in range(self.num_convpools):
+            if i == 0:
+                convpools.append(PLDDTWeightedGAT(in_dim, hid_dim))
+            else:
+                convpools.append(ConvPoolBlock(hid_dim, hid_dim, pool_ratio=pool_ratio))
+
+        #Normal
+        # for i in range(num_convs):
+        #     _i_dim = in_dim if i == 0 else hid_dim
+        #     _o_dim = hid_dim
+        #     convpools.append(ConvPoolBlock(_i_dim, _o_dim, pool_ratio=pool_ratio))
+
         self.convpools = torch.nn.ModuleList(convpools)
         self.transformer_encoder = torch.nn.TransformerEncoder(
-            torch.nn.TransformerEncoderLayer(hid_dim * 2 + 1024, nhead=8), num_layers=6)    
-        self.lin1 = torch.nn.Linear(hid_dim * 2 + 1024, hid_dim * 2)
-        #self.lin1 = torch.nn.Linear(hid_dim * 2, hid_dim)
-        #self.lin1 = torch.nn.Linear(1024,hid_dim)
-        self.lin2 = torch.nn.Linear(hid_dim*2, hid_dim)
-        self.lin3 = torch.nn.Linear(hid_dim, out_dim)
+            torch.nn.TransformerEncoderLayer(hid_dim * 2 + 1024, nhead=8), num_layers=6)
+
+        self.lin1 = torch.nn.Linear(hid_dim * 2 + 1024, hid_dim*2)
+        self.lin2 = torch.nn.Linear(hid_dim*2, hid_dim*2)
+        self.lin3 = torch.nn.Linear(1024, out_dim)
         self.label_network1 = GATConv(128,1,num_heads=8,allow_zero_in_degree=True)
 
         self.line_new = torch.nn.Linear(hid_dim * 2 + 1024, out_dim)
@@ -67,9 +80,33 @@ class SAGNetworkHierarchical(torch.nn.Module):
         return labels
     
 
-    def forward(self, graph:dgl.DGLGraph, sequence_feature,label_network:dgl.DGLGraph):
+    def forward(self, graph:dgl.DGLGraph, sequence_feature, label_network:dgl.DGLGraph):
         feat = graph.ndata["feature"]
         final_readout = None
+
+        #Before pooling
+        
+        for i in range(self.num_convpools):
+            if i == 0:
+                src, dst = graph.edges()
+                graph.edata['weight'] = (
+                    (graph.ndata['plddt'][src] + graph.ndata["plddt"][dst]) / 2.0
+                ).float()
+                feat = self.convpools[i](graph, feat)
+            else:
+                graph, feat, readout = self.convpools[i](graph, feat)
+                if final_readout is None:
+                    final_readout = readout
+                else:
+                    final_readout = final_readout + readout
+        
+
+        #Normal
+        """
+        src, dst = graph.edges()
+        graph.edata['weight'] = (
+            (graph.ndata['plddt'][src] + graph.ndata["plddt"][dst]) / 2.0
+        ).float()
 
         for i in range(self.num_convpools):
             graph, feat, readout = self.convpools[i](graph, feat)
@@ -77,18 +114,44 @@ class SAGNetworkHierarchical(torch.nn.Module):
                 final_readout = readout
             else:
                 final_readout = final_readout + readout
-        #final_readout = torch.cat((final_readout,sequence_feature), -1)
+        """
+        """
+        seq = self.seq_proj(sequence_feature)
+        struct = self.struct_proj(final_readout)
 
-        seq_proj = self.seq_proj(sequence_feature)
+        seq_tok = seq.unsqueeze(1)                       # (B, 1, D)
+        struct_tok = struct.unsqueeze(1)
 
-        #struct_feat = final_readout.unsqueeze(1).expand(-1, seq_proj.shape[1], -1)
-        #struct_feat = self.struct_proj(final_readout)
-        struct_feat = final_readout
-        fused = self.cross_attn(sequence_feature, struct_feat)
-        final_readout = torch.cat([sequence_feature, fused], dim=-1)
+        fused = self.cross_attn(seq_tok, struct_tok)
+        fused = fused.squeeze(1)
 
-        #con_readout = self.transformer_encoder(final_readout)
-        #final_readout = torch.cat((sequence_feature,con_readout), -1)
+        final_readout = torch.cat([seq, fused], dim=-1)
+        """
+        structure_proj = self.struct_proj(final_readout)
+        sequence_proj = self.seq_proj(sequence_feature)
+        #print(graph.ndata["plddt"])
+        #i = input("Here")
+        graph.ndata["plddt"] = graph.ndata["plddt"].float()
+        plddt = dgl.readout_nodes(graph, "plddt", op="mean")
+        alpha = torch.sigmoid(self.fusion_gate(plddt))      # (B, 1)
+        fused = alpha * structure_proj + (1 - alpha) * sequence_proj
+        fused = fused.unsqueeze(1)          # (B, 1, hid_dim)
+        sequence_proj = sequence_proj.unsqueeze(1)
+        cross_attn_out = self.cross_attn(fused, sequence_proj)  # (B, 1, hid_dim)
+        cross_attn_out = cross_attn_out.squeeze(1)
+        #big_graph = torch.cat(all_readouts, dim=-1)
+        final_readout = torch.cat((sequence_feature,cross_attn_out), -1)
+
+        """
+        # ---- Insert Transformer Encoder here ----
+        # Transformer expects (seq_len, batch_size, feature_dim)
+        tokens = final_readout.unsqueeze(1).transpose(0, 1)  # (1, B, hid_dim_total)
+        tokens = self.transformer_encoder(tokens)           # (1, B, hid_dim_total)
+        tokens = tokens.transpose(0, 1).squeeze(1)          # (B, hid_dim_total)
+        final_readout = tokens
+        # ----------------------------------------
+        """
+
         feat = F.relu(self.lin1(final_readout))
         feat = F.dropout(feat, p=self.dropout, training=self.training)
         feat = F.relu(self.lin2(feat))
