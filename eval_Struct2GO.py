@@ -11,8 +11,11 @@ from sklearn.metrics import average_precision_score
 from sklearn.metrics import roc_auc_score
 import warnings
 import datetime
+import dgl
 import pandas as pd
 import matplotlib.pyplot as plt
+from Bio.PDB import PDBParser
+import requests
 
 
 
@@ -22,20 +25,47 @@ Thresholds = list(map(lambda x:round(x*0.01,2), list(range(1,100))))
 if __name__ == "__main__":
     #参数设置
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-test_data', '--test_data',type=str,default='/home/jiaops/lyjps/divided_data/mf_test_dataset')
-    parser.add_argument('-branch', '--branch',type=str,default='mf')
-    parser.add_argument('-model','--model',type=str,default='/home/jiaops/lyjps/save_models/mymodel_mf_1_0.0005_0.45.pkl')
-    parser.add_argument('-labels_num', '--labels_num',type=int,default=273)
-    parser.add_argument('-label_network', '--label_network', type=str, default='/home/jiaops/lyjps/processed_data/label_mf_network ')
+    parser.add_argument('-test_data', '--test_data',type=str,default='bp_test_plddt.pkl')
+    parser.add_argument('-branch', '--branch',type=str,default='bp')
+    parser.add_argument('-model','--model',type=str,default='save_models/mymodel_bp_8_0.0005_0.45.pkl')
+    parser.add_argument('-labels_num', '--labels_num',type=int,default=809)
+    parser.add_argument('-label_network', '--label_network', type=str, default='bp_label_network.dgl')
     args = parser.parse_args()
     labels_num = args.labels_num
+
+    class DGLSafeUnpickler(pickle.Unpickler):
+        def find_class(self, module, name):
+            if name == 'DGLHeteroGraph':
+                return dgl.DGLGraph  # for older DGL versions
+            return super().find_class(module, name) 
+        
+    def get_alphafold_plddt(uniprot_id): #TRY CHANGING DEFAULT
+        parser = PDBParser(QUIET=True)
+
+        url = f"https://alphafold.ebi.ac.uk/files/AF-{uniprot_id}-F1-model_v4.pdb"
+        response = requests.get(url)
+
+        plddts = []
+
+        for line in response.text.splitlines():
+            if line.startswith("ATOM") and line[12:16].strip() == "CA":
+                plddts.append(float(line[60:66]))
+        
+        #residue_plddt = [np.mean(plddts[i:i+4]) for i in range(0, len(plddts), 4)] #Aggregate pooling of plddts
+
+        return plddts
+
     with open(args.test_data,'rb')as f:
-        test_dataset = pickle.load(f)
+        test_dataset = DGLSafeUnpickler(f).load()
     with open(args.label_network,'rb')as f:
-        label_network=pickle.load(f)
+        label_network, _ = dgl.load_graphs(args.label_network)
+        label_network = label_network[0]
+        print(type(label_network))
     model = torch.load(args.model)
 
-    test_dataloader = GraphDataLoader(dataset=test_dataset, batch_size = 1,drop_last = False, shuffle = True)
+    print("test", len(test_dataset))
+    
+    test_dataloader = GraphDataLoader(dataset=test_dataset, batch_size = 8,drop_last = False, shuffle = True)
     time = datetime.datetime.now()
     print(time)
     print('#########'+args.branch+'###########')
@@ -47,28 +77,42 @@ if __name__ == "__main__":
     pred = []
     actual = []
     model.eval()   
+    criterion = torch.nn.BCEWithLogitsLoss()
     for batched_graph, labels,sequence_feature  in test_dataloader:
             logits = model(batched_graph.to('cuda'), sequence_feature.to('cuda'),label_network.to('cuda'))
-            labels = torch.reshape(labels,(-1,labels_num))
+            #labels = torch.reshape(labels,(-1,labels_num))
+            #labels = labels.reshape(-1, labels_num).float().to('cuda')
+            labels = labels.reshape(labels.size(0), labels_num).float().to('cuda')
+            print(labels.dim())
             loss = F.cross_entropy(logits,labels.to('cuda'))
             t_loss += loss.item()
             test_batch_num += 1
-            pred.append(torch.sigmoid(logits).tolist())
-            actual.append(labels.tolist())
+            pred.append(torch.sigmoid(logits).detach().cpu().numpy())  # (B, L)
+            actual.append(labels.detach().cpu().numpy())      
+    actual = np.concatenate(actual, axis=0)   # (N, L)
+    pred = np.concatenate(pred, axis=0) 
             #writer.add_pr_curve('pr_curve',labels,logits,0)
     test_loss = "{}".format(t_loss / test_batch_num)    
     #writer.add_scalar('test/loss',test_loss,epoch)
     fpr, tpr, th = roc_curve(np.array(actual).flatten(), np.array(pred).flatten(), pos_label=1)
     auc_score = auc(fpr, tpr)
+
+    # average number of labels per protein
+    print("Avg labels per protein:", actual.sum(axis=1).mean())
+
+    # fraction of positives
+    print("Positive rate:", actual.mean())
+
+    # proteins with no labels
+    print("Zero-label proteins:", np.sum(actual.sum(axis=1) == 0))
     
     auc_values = []
-    actual_array = np.array(actual)
-    pred_array = np.array(pred) 
-    actual_array = actual_array[:,0,:]
-    pred_array = pred_array[:,0,:]
-    n_labels = actual_array.shape[1]
-    for i in range(n_labels):
-        fpr, tpr, _ = roc_curve(actual_array[:, i].flatten(), pred_array[:, i].flatten(), pos_label=1)
+    print("here", actual)
+    n_labels = actual.shape[1]
+    print(n_labels)
+    for j in range(n_labels):
+        print(j)
+        fpr, tpr, _ = roc_curve(actual.flatten(), pred.flatten(), pos_label=1)
         auc_score = auc(fpr, tpr)
         auc_values.append(auc_score)
 
@@ -76,11 +120,9 @@ if __name__ == "__main__":
     aupr_values = []
     y_true = np.array(actual) 
     y_scores = np.array(pred)
-    y_true = y_true[:,0,:]
-    y_scores = y_scores[:,0,:]
     n_labels = y_true.shape[1]
-    for i in range(n_labels):
-        aupr1 = average_precision_score(y_true[:, i], y_scores[:, i])
+    for k in range(n_labels):
+        aupr1 = average_precision_score(y_true[:, k], y_scores[:, k])
         aupr_values.append((1-0.3)*aupr1 + 0.3*aupr)
 
     score_dict = {}
@@ -89,6 +131,7 @@ if __name__ == "__main__":
     each_best_scores = []
     #writer.add_pr_curve('pr_curve',actual,pred,0,num_thresholds=labels_num)
     for i in range(len(Thresholds)):
+        print("threshy", i)
         f_score,precision, recall  = calculate_performance(actual, pred, label_network,threshold=Thresholds[i])
         if f_score >= each_best_fcore:
             each_best_fcore = f_score
@@ -100,6 +143,9 @@ if __name__ == "__main__":
     # auc_values, aupr_values = each_best_scores[5],each_best_scores[6]
     print('testloss:{},t:{},f_score{}, auc{}, recall{}, precision{},aupr{}'.format(
         test_loss, t, f_score, auc_score, recall, precision,aupr))  
+        
+    
+
     # print('f_score: {}'.format(f_score))
     # print('auc_values: {}'.format(auc_values))
     # print('aupr_values: {}'.format(aupr_values))   
