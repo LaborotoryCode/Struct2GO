@@ -34,7 +34,7 @@ from torch.utils.data import Subset, random_split
 
 
 warnings.filterwarnings('ignore')
-Thresholds = list(map(lambda x:round(x*0.01,2), list(range(0,100))))
+Thresholds = list(map(lambda x:round(x*0.01,2), list(range(60,100))))
 
 # def cacul_aupr(lables, pred):
 #     precision, recall, _thresholds = metrics.precision_recall_curve(lables, pred)
@@ -67,11 +67,11 @@ if __name__ == "__main__":
     parser.add_argument('--network_file', type=str, default='network', help='File name to import network from')
     parser.add_argument('-learningrate', '--learningrate',type=float,default=5e-4)
     parser.add_argument('-dropout', '--dropout',type=float,default=0.45)
-    parser.add_argument('-train_data', '--train_data',type=str,default="divided_data/bp_train_dataset")
-    parser.add_argument('-valid_data', '--valid_data',type=str,default="mf_valid_plddt.pkl")
+    parser.add_argument('-train_data', '--train_data',type=str,default="new_bp_train_plddt.pkl")
+    parser.add_argument('-valid_data', '--valid_data',type=str,default="new_bp_valid_plddt.pkl")
     parser.add_argument('-branch', '--branch',type=str,default='bp')
-    parser.add_argument('-labels_num', '--labels_num',type=int,default=273)
-    parser.add_argument('-label_network', '--label_network', type=str, default="mf_label_network.dgl")
+    parser.add_argument('-labels_num', '--labels_num',type=int,default=809)
+    parser.add_argument('-label_network', '--label_network', type=str, default="bp_label_network.dgl")
 
     args = parser.parse_args()
     network_file = importlib.import_module(f"model.{args.network_file}")
@@ -79,7 +79,6 @@ if __name__ == "__main__":
     SAGNetworkGlobal = network_file.SAGNetworkGlobal
 
     e = 0
-
 
     class DGLSafeUnpickler(pickle.Unpickler):
         def find_class(self, module, name):
@@ -99,97 +98,6 @@ if __name__ == "__main__":
         label_network, _ = dgl.load_graphs(args.label_network)
         label_network = label_network[0]
         print(type(label_network))
-
-
-    ###START###
-
-    # Function to fetch pLDDT scores for a given UniProt ID
-    def get_alphafold_plddt(uniprot_id):
-        """
-        Fetch per-residue pLDDT scores from AlphaFold JSON (confidenceScore field).
-        Returns a list of floats.
-        """
-        url = f"https://alphafold.ebi.ac.uk/files/AF-{uniprot_id}-F1-confidence_v6.json"
-        try:
-            response = requests.get(url)
-            if response.status_code != 200:
-                print(f"[ERROR] Failed to get {uniprot_id}: {response.status_code}")
-                return []
-
-            data = response.json()
-            if "confidenceScore" in data:
-                return data["confidenceScore"]
-            else:
-                print(f"[ERROR] 'confidenceScore' key not found in JSON for {uniprot_id}")
-                return []
-
-        except Exception as e:
-            print(f"[ERROR] Exception for {uniprot_id}: {e}")
-            return []
-
-    parent = train_dataset.dataset if hasattr(train_dataset, "dataset") else train_dataset
-    subset_indices = train_dataset.indices if hasattr(train_dataset, "indices") else range(len(train_dataset))
-
-    
-    missing_count = 0
-    updated_graphs = []
-
-    for i in range(len(train_dataset)):
-        print(f"Processing {i+1}/{len(train_dataset)}")
-
-        graph, label, sequence = train_dataset[i]
-        protein_id = parent.list[subset_indices[i]]
-        print("try", protein_id)
-
-        plddt = get_alphafold_plddt(protein_id)
-        #print("plddt", plddt)
-        num_nodes = graph.number_of_nodes()
-
-        if len(plddt) > 0:
-            plddt_tensor = torch.tensor(plddt[:num_nodes], dtype=torch.float32).unsqueeze(-1)
-            if len(plddt_tensor) < num_nodes:
-                pad_len = num_nodes - len(plddt_tensor)
-                pad = torch.full((pad_len, 1), 70.0)  # Default confidence
-                plddt_tensor = torch.cat([plddt_tensor, pad], dim=0)
-        else:
-            plddt_tensor = torch.full((num_nodes, 1), 70.0)
-            missing_count += 1
-
-        #print(plddt_tensor)
-        graph.ndata["plddt"] = plddt_tensor
-        updated_graphs.append((graph, label, sequence))
-
-    print(f"Proteins with missing pLDDT: {missing_count}")
-
-    total_len = len(updated_graphs)
-    train_len = int(0.7 * total_len)
-    valid_len = int(0.2 * total_len)
-    test_len = total_len - train_len - valid_len
-
-    torch.manual_seed(42)
-    indices = torch.randperm(total_len)
-
-    train_indices = indices[:train_len].tolist()
-    valid_indices = indices[train_len:train_len+valid_len].tolist()
-    test_indices = indices[train_len+valid_len:].tolist()
-
-    train_dataset = Subset(updated_graphs, train_indices)
-    valid_dataset = Subset(updated_graphs, valid_indices)
-    test_dataset = Subset(updated_graphs, test_indices)
-
-    import pickle
-
-    with open("new_bp_train_plddt.pkl", "wb") as f:
-        pickle.dump(train_dataset, f)
-    with open("new_bp_valid_plddt.pkl", "wb") as f:
-        pickle.dump(valid_dataset, f)
-    with open("new_bp_test_plddt.pkl", "wb") as f:
-        pickle.dump(test_dataset, f)
-
-
-    inp = input("breaker breaker 190")
-    ###END###
-
 
 
     # class MyDataSet(Dataset):
@@ -224,7 +132,7 @@ if __name__ == "__main__":
  
     dataloader = GraphDataLoader(dataset=train_dataset, batch_size = batch_size,drop_last = False, shuffle = True)
     print("leng", len(dataloader))
-    valid_dataloader = GraphDataLoader(dataset=valid_dataset, batch_size = 1,drop_last = False, shuffle = False)
+    valid_dataloader = GraphDataLoader(dataset=valid_dataset, batch_size = 8,drop_last = False, shuffle = False)
     print("length", len(valid_dataloader))
     time = datetime.datetime.now()
     print(time)
@@ -259,7 +167,7 @@ if __name__ == "__main__":
     aupr_loss = []
     i=1
 
-    for epoch in range(50):
+    for epoch in range(40):
 
         i+=1
 
@@ -345,7 +253,7 @@ if __name__ == "__main__":
                 #print("Running validation")
                 logits = model(batched_graph.to('cuda'),sequence_feature.to('cuda'),label_network.to('cuda'))
                 labels = torch.reshape(labels,(-1,labels_num))
-                loss = F.cross_entropy(logits,labels.to('cuda'))
+                loss = loss_fcn(logits, labels.to('cuda'))
                 #loss = F.binary_cross_entropy(logits,labels.to('cuda'))
                 t_loss += loss.item()
                 valid_batch_num += 1
@@ -362,8 +270,8 @@ if __name__ == "__main__":
             aupr=cacul_aupr(np.array(actual).flatten(), np.array(pred).flatten())
             score_dict = {}
             each_best_aupr = 0
-            best_fscore = 0
             each_best_scores = []
+            best_fscore = 0
             print(aupr_loss)
             #writer.add_pr_curve('pr_curve',actual,pred,0,num_thresholds=labels_num)
             for i in range(len(Thresholds)):
@@ -371,16 +279,16 @@ if __name__ == "__main__":
                 f_score,precision, recall  = calculate_performance(actual, pred, label_network,threshold=Thresholds[i])
                 if f_score >= best_fscore:
                     best_fscore = f_score
-                    each_best_aupr = aupr
-                    each_best_scores = [Thresholds[i], f_score, recall, precision, auc_score]
-                    scores = [f_score, recall, precision, auc_score]
+                   # each_best_aupr = aupr
+                    each_best_scores = [Thresholds[i], f_score, recall, precision, auc_score, aupr]
+                    scores = [f_score, recall, precision, auc_score, aupr]
                     score_dict[Thresholds[i]] = scores
             aupr_loss.append(aupr)
             if aupr_loss[epoch] >= best_aupr:
-                best_aupr = each_best_aupr
+                best_aupr = aupr_loss[epoch]
                 best_scores = each_best_scores
                 best_score_dict = score_dict
-                torch.save(model, 'save_models/mymodel_{}_{}_{}_{}_{}.pkl'.format(args.branch,batch_size,learningrate,dropout, aupr))
+                torch.save(model, 'save_models/mymodel_{}_{}_{}_{}_{}_{}.pkl'.format(args.branch,args.network_file, batch_size,learningrate,dropout, aupr))
             t, f_score, recall = each_best_scores[0], each_best_scores[1], each_best_scores[2]
             precision, auc_score = each_best_scores[3], each_best_scores[4] 
             print('########valid metric###########')
@@ -395,7 +303,7 @@ if __name__ == "__main__":
             t_loss += loss.item()
             valid_batch_num += 1
             pred.append(torch.sigmoid(logits).tolist())
-            actual.append(labels.tolist())
+            actual.append(labels.tolist())no 
             #writer.add_pr_curve('pr_curve',labels,logits,0)
         test_loss = "{}".format(t_loss / valid_batch_num)    
         #mlb = MultiLabelBinarizer()
@@ -456,9 +364,9 @@ if __name__ == "__main__":
         f.write(f"Thing: {args.branch}\n")
         f.write(f"Network File: {args.network_file}\n")
         f.write("Best Validation Results\n")
-        f.write(f"Threshold: {each_best_scores[0]}\n")
-        f.write(f"F-score: {each_best_scores[1]}\n")
-        f.write(f"Recall: {each_best_scores[2]}\n")
-        f.write(f"Precision: {each_best_scores[3]}\n")
-        f.write(f"AUC: {each_best_scores[4]}\n")
+        f.write(f"Threshold: {best_scores[0]}\n")
+        f.write(f"F-score: {best_scores[1]}\n")
+        f.write(f"Recall: {best_scores[2]}\n")
+        f.write(f"Precision: {best_scores[3]}\n")
+        f.write(f"AUC: {best_scores[4]}\n")
         f.write(f"AUPR: {aupr}\n")
