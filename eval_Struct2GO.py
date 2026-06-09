@@ -3,189 +3,321 @@ import torch.nn.functional as F
 import argparse
 import numpy as np
 from dgl.dataloading import GraphDataLoader
-from sklearn.metrics import roc_auc_score, roc_curve, auc, precision_score, recall_score, f1_score, average_precision_score
+from sklearn.metrics import roc_curve, auc, average_precision_score, precision_recall_curve
 import pickle
 from data_processing.divide_data import MyDataSet
-from model.evaluation import cacul_aupr,calculate_performance
-from sklearn.metrics import average_precision_score
-from sklearn.metrics import roc_auc_score
+from model.evaluation import cacul_aupr, calculate_performance
 import warnings
 import datetime
 import dgl
-import pandas as pd
+import importlib
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from Bio.PDB import PDBParser
-import requests
-
-
+from pathlib import Path
+import pandas as pd
 
 warnings.filterwarnings('ignore')
-Thresholds = list(map(lambda x:round(x*0.01,2), list(range(1,100))))
+Thresholds = list(np.linspace(0.01, 0.5, 50))
 
-if __name__ == "__main__":
-    #参数设置
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-test_data', '--test_data',type=str,default='bp_test_plddt.pkl')
-    parser.add_argument('-branch', '--branch',type=str,default='bp')
-    parser.add_argument('-model','--model',type=str,default='save_models/mymodel_bp_8_0.0005_0.45.pkl')
-    parser.add_argument('-labels_num', '--labels_num',type=int,default=809)
-    parser.add_argument('-label_network', '--label_network', type=str, default='bp_label_network.dgl')
-    args = parser.parse_args()
-    labels_num = args.labels_num
+MODEL_PATH_TEMPLATE = "save_models/base/DeepFRI_{}_{}_{}_{}_{:.4f}_seed{}.pkl"
 
-    class DGLSafeUnpickler(pickle.Unpickler):
-        def find_class(self, module, name):
-            if name == 'DGLHeteroGraph':
-                return dgl.DGLGraph  # for older DGL versions
-            return super().find_class(module, name) 
-        
-    def get_alphafold_plddt(uniprot_id): #TRY CHANGING DEFAULT
-        parser = PDBParser(QUIET=True)
 
-        url = f"https://alphafold.ebi.ac.uk/files/AF-{uniprot_id}-F1-model_v4.pdb"
-        response = requests.get(url)
+class DGLSafeUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if name == 'DGLHeteroGraph':
+            return dgl.DGLGraph
+        return super().find_class(module, name)
 
-        plddts = []
 
-        for line in response.text.splitlines():
-            if line.startswith("ATOM") and line[12:16].strip() == "CA":
-                plddts.append(float(line[60:66]))
-        
-        #residue_plddt = [np.mean(plddts[i:i+4]) for i in range(0, len(plddts), 4)] #Aggregate pooling of plddts
+def ensure_supplementary_dir(args):
+    output_dir = Path(f"supplementary/test/base/{args.branch}/{args.network_file}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
 
-        return plddts
 
-    with open(args.test_data,'rb')as f:
+def compute_threshold_metrics(actual, pred, label_network=None, thresholds=None):
+    thresholds = thresholds if thresholds is not None else np.linspace(0.01, 0.5, 50)
+    rows = []
+    best_metrics = None
+    best_f1 = -1.0
+
+    for threshold in thresholds:
+        f_score, precision, recall = calculate_performance(
+            actual, pred, label_network, threshold=float(threshold)
+        )
+        row = {
+            "threshold": float(threshold),
+            "f1": float(f_score),
+            "precision": float(precision),
+            "recall": float(recall),
+        }
+        rows.append(row)
+        if f_score >= best_f1:
+            best_f1 = float(f_score)
+            best_metrics = row
+
+    return rows, best_metrics
+
+
+def compute_eval_metrics(actual, pred, label_network=None, thresholds=None):
+    fpr, tpr, _ = roc_curve(actual.flatten(), pred.flatten(), pos_label=1)
+    auc_score = auc(fpr, tpr)
+    aupr = cacul_aupr(actual.flatten(), pred.flatten())
+    threshold_rows, best_threshold_metrics = compute_threshold_metrics(
+        actual, pred, label_network, thresholds
+    )
+    metrics_dict = {
+        "auc": float(auc_score),
+        "aupr": float(aupr),
+        "f1": float(best_threshold_metrics["f1"]),
+        "precision": float(best_threshold_metrics["precision"]),
+        "recall": float(best_threshold_metrics["recall"]),
+        "threshold": float(best_threshold_metrics["threshold"]),
+    }
+    return metrics_dict, threshold_rows
+
+
+def save_pr_curve(actual, pred, output_dir):
+    precision, recall, _ = precision_recall_curve(actual.flatten(), pred.flatten())
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.plot(recall, precision, color="steelblue")
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.set_title("Precision-Recall Curve (Test)")
+    ax.grid(True)
+    fig.tight_layout()
+    fig.savefig(output_dir / "test_pr_curve.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_threshold_analysis(threshold_rows, output_dir):
+    df = pd.DataFrame(threshold_rows)
+    df.to_csv(output_dir / "test_threshold_values.csv", index=False)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(df["threshold"], df["f1"], label="F1")
+    ax.plot(df["threshold"], df["precision"], label="Precision")
+    ax.plot(df["threshold"], df["recall"], label="Recall")
+    ax.set_xlabel("Threshold")
+    ax.set_ylabel("Score")
+    ax.set_title("Threshold Analysis (Test)")
+    ax.legend()
+    ax.grid(True)
+    fig.tight_layout()
+    fig.savefig(output_dir / "test_threshold_analysis.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_per_label_distribution(actual, pred, output_dir):
+    per_label_scores = []
+    for label_idx in range(actual.shape[1]):
+        y_true = actual[:, label_idx]
+        y_score = pred[:, label_idx]
+        if np.unique(y_true).size < 2:
+            continue
+        per_label_scores.append(average_precision_score(y_true, y_score))
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    if per_label_scores:
+        ax.hist(per_label_scores, bins=30, color="slateblue", edgecolor="black")
+    ax.set_xlabel("Per-label AUPR")
+    ax.set_ylabel("Count")
+    ax.set_title("Per-label Performance Distribution (Test)")
+    ax.grid(True)
+    fig.tight_layout()
+    fig.savefig(output_dir / "test_per_label_distribution.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def append_results_row(output_dir, model_name, seed, metrics_dict):
+    csv_path = output_dir / "test_results.csv"
+    row = {
+        "model": model_name,
+        "seed": seed,
+        "auc": metrics_dict["auc"],
+        "aupr": metrics_dict["aupr"],
+        "f1": metrics_dict["f1"],
+        "precision": metrics_dict["precision"],
+        "recall": metrics_dict["recall"],
+        "threshold": metrics_dict["threshold"],
+    }
+    if csv_path.exists():
+        df = pd.read_csv(csv_path)
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    else:
+        df = pd.DataFrame([row])
+    df.to_csv(csv_path, index=False)
+    return df
+
+
+def save_results_xlsx(output_dir, all_metrics, args):
+    rows = []
+    for seed, metrics in zip(range(len(all_metrics)), all_metrics):
+        row = {"model": args.network_file, "seed": seed}
+        row.update(metrics)
+        rows.append(row)
+
+    # Add mean and std rows
+    keys = ["auc", "aupr", "f1", "precision", "recall"]
+    mean_row = {"model": args.network_file, "seed": "mean"}
+    std_row = {"model": args.network_file, "seed": "std"}
+    for k in keys:
+        vals = np.array([m[k] for m in all_metrics])
+        mean_row[k] = round(vals.mean(), 6)
+        std_row[k] = round(vals.std(ddof=0), 6)
+    rows.append(mean_row)
+    rows.append(std_row)
+
+    df = pd.DataFrame(rows)
+    xlsx_path = output_dir / "test_results.xlsx"
+    df.to_excel(xlsx_path, index=False)
+    print(f"Saved results to {xlsx_path}")
+
+
+def save_statistics(output_dir, all_metrics):
+    auprs = np.array([m["aupr"] for m in all_metrics])
+    aucs = np.array([m["auc"] for m in all_metrics])
+    f1s = np.array([m["f1"] for m in all_metrics])
+    text = (
+        f"AUPR: {auprs.mean():.6f} ± {auprs.std(ddof=0):.6f}\n"
+        f"AUC:  {aucs.mean():.6f} ± {aucs.std(ddof=0):.6f}\n"
+        f"F1:   {f1s.mean():.6f} ± {f1s.std(ddof=0):.6f}\n"
+    )
+    (output_dir / "test_statistics.txt").write_text(text, encoding="utf-8")
+    print(text)
+
+def append_global_results(args, seed, metrics_dict):
+    csv_path = Path("supplementary/test/all_results.csv")
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "branch": args.branch,
+        "model": args.network_file,
+        "seed": seed,
+        "auc": metrics_dict["auc"],
+        "aupr": metrics_dict["aupr"],
+        "f1": metrics_dict["f1"],
+        "precision": metrics_dict["precision"],
+        "recall": metrics_dict["recall"],
+    }
+    if csv_path.exists():
+        df = pd.read_csv(csv_path)
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    else:
+        df = pd.DataFrame([row])
+    df.to_csv(csv_path, index=False)
+
+
+def run_test(args, seed, write_supplementary=False):
+    output_dir = ensure_supplementary_dir(args)
+
+    network_file = importlib.import_module(f"model.{args.network_file}")
+    GATGONetwork = network_file.GATGOControlNetwork
+
+    with open(args.test_data, "rb") as f:
         test_dataset = DGLSafeUnpickler(f).load()
-    with open(args.label_network,'rb')as f:
-        label_network, _ = dgl.load_graphs(args.label_network)
-        label_network = label_network[0]
-        print(type(label_network))
-    model = torch.load(args.model)
 
-    print("test", len(test_dataset))
-    
-    test_dataloader = GraphDataLoader(dataset=test_dataset, batch_size = 8,drop_last = False, shuffle = True)
-    time = datetime.datetime.now()
-    print(time)
-    print('#########'+args.branch+'###########')
-    print('########start testing###########') 
+    label_network, _ = dgl.load_graphs(args.label_network)
+    label_network = label_network[0]
 
+    test_dataloader = GraphDataLoader(
+        dataset=test_dataset, batch_size=8, drop_last=False, shuffle=False
+    )
 
-    t_loss = 0
+    model_path = MODEL_PATH_TEMPLATE.format(
+        args.branch, args.network_file, args.batch_size, args.learningrate, args.dropout, seed
+    )
+
+    print(datetime.datetime.now())
+    print(f"######### {args.branch} ###########")
+    print(f"######## testing seed {seed} | model: {model_path} ###########")
+
+    model = GATGONetwork(
+        56, 512, args.labels_num, num_layers=args.num_layers, dropout=args.dropout
+    ).to("cuda")
+    model.load_state_dict(torch.load(model_path, map_location="cuda"))
+    model.eval()
+
+    loss_fcn = torch.nn.BCEWithLogitsLoss()
+    all_preds = []
+    all_actuals = []
+    t_loss = 0.0
     test_batch_num = 0
-    pred = []
-    actual = []
-    model.eval()   
-    criterion = torch.nn.BCEWithLogitsLoss()
-    for batched_graph, labels,sequence_feature  in test_dataloader:
-            logits = model(batched_graph.to('cuda'), sequence_feature.to('cuda'),label_network.to('cuda'))
-            #labels = torch.reshape(labels,(-1,labels_num))
-            #labels = labels.reshape(-1, labels_num).float().to('cuda')
-            labels = labels.reshape(labels.size(0), labels_num).float().to('cuda')
-            print(labels.dim())
-            loss = F.cross_entropy(logits,labels.to('cuda'))
+
+    with torch.no_grad():
+        for batched_graph, labels, sequence_feature in test_dataloader:
+            logits = model(batched_graph.to("cuda"), sequence_feature.to("cuda"))
+            labels = labels.reshape(-1, args.labels_num).float().to("cuda")
+            loss = loss_fcn(logits, labels)
             t_loss += loss.item()
             test_batch_num += 1
-            pred.append(torch.sigmoid(logits).detach().cpu().numpy())  # (B, L)
-            actual.append(labels.detach().cpu().numpy())      
-    actual = np.concatenate(actual, axis=0)   # (N, L)
-    pred = np.concatenate(pred, axis=0) 
-            #writer.add_pr_curve('pr_curve',labels,logits,0)
-    test_loss = "{}".format(t_loss / test_batch_num)    
-    #writer.add_scalar('test/loss',test_loss,epoch)
-    fpr, tpr, th = roc_curve(np.array(actual).flatten(), np.array(pred).flatten(), pos_label=1)
-    auc_score = auc(fpr, tpr)
+            all_preds.append(torch.sigmoid(logits).cpu().numpy())
+            all_actuals.append(labels.cpu().numpy())
 
-    # average number of labels per protein
-    print("Avg labels per protein:", actual.sum(axis=1).mean())
+    pred = np.concatenate(all_preds, axis=0)
+    actual = np.concatenate(all_actuals, axis=0)
+    test_loss = t_loss / test_batch_num
 
-    # fraction of positives
-    print("Positive rate:", actual.mean())
+    metrics_dict, threshold_rows = compute_eval_metrics(
+        actual, pred, label_network, Thresholds
+    )
 
-    # proteins with no labels
-    print("Zero-label proteins:", np.sum(actual.sum(axis=1) == 0))
-    
-    auc_values = []
-    print("here", actual)
-    n_labels = actual.shape[1]
-    print(n_labels)
-    for j in range(n_labels):
-        print(j)
-        fpr, tpr, _ = roc_curve(actual.flatten(), pred.flatten(), pos_label=1)
-        auc_score = auc(fpr, tpr)
-        auc_values.append(auc_score)
+    print(
+        f"seed {seed} | test_loss: {test_loss:.6f} | t: {metrics_dict['threshold']:.2f} | "
+        f"f1: {metrics_dict['f1']:.6f} | auc: {metrics_dict['auc']:.6f} | "
+        f"recall: {metrics_dict['recall']:.6f} | precision: {metrics_dict['precision']:.6f} | "
+        f"aupr: {metrics_dict['aupr']:.6f}"
+    )
 
-    aupr=cacul_aupr(np.array(actual).flatten(), np.array(pred).flatten())
-    aupr_values = []
-    y_true = np.array(actual) 
-    y_scores = np.array(pred)
-    n_labels = y_true.shape[1]
-    for k in range(n_labels):
-        aupr1 = average_precision_score(y_true[:, k], y_scores[:, k])
-        aupr_values.append((1-0.3)*aupr1 + 0.3*aupr)
+    append_results_row(output_dir, args.network_file, seed, metrics_dict)
+    append_global_results(args, seed, metrics_dict)
 
-    score_dict = {}
-    each_best_fcore = 0
-    #best_fscore = 0
-    each_best_scores = []
-    #writer.add_pr_curve('pr_curve',actual,pred,0,num_thresholds=labels_num)
-    for i in range(len(Thresholds)):
-        print("threshy", i)
-        f_score,precision, recall  = calculate_performance(actual, pred, label_network,threshold=Thresholds[i])
-        if f_score >= each_best_fcore:
-            each_best_fcore = f_score
-            each_best_scores = [Thresholds[i], f_score, recall, precision, auc_score,auc_values,aupr_values]
-            scores = [f_score, recall, precision, auc_score]
-            score_dict[Thresholds[i]] = scores        
-    t, f_score, recall = each_best_scores[0], each_best_scores[1], each_best_scores[2]
-    precision, auc_score = each_best_scores[3], each_best_scores[4] 
-    # auc_values, aupr_values = each_best_scores[5],each_best_scores[6]
-    print('testloss:{},t:{},f_score{}, auc{}, recall{}, precision{},aupr{}'.format(
-        test_loss, t, f_score, auc_score, recall, precision,aupr))  
-        
-    
+    if write_supplementary:
+        save_pr_curve(actual, pred, output_dir)
+        save_threshold_analysis(threshold_rows, output_dir)
+        save_per_label_distribution(actual, pred, output_dir)
 
-    # print('f_score: {}'.format(f_score))
-    # print('auc_values: {}'.format(auc_values))
-    # print('aupr_values: {}'.format(aupr_values))   
-    # df1 = pd.DataFrame(f_score)
-    # df2 = pd.DataFrame(auc_values)
-    # df3 = pd.DataFrame(aupr_values)
-    # df1.to_excel('f_score.xlsx', index=False, engine='openpyxl')
-    # df2.to_excel('auc_values.xlsx', index=False, engine='openpyxl')
-    # df3.to_excel('aupr_values.xlsx', index=False, engine='openpyxl')
-    
-    # bins = [i/10 for i in range(11)]
-    # # 设置柱状图的宽度和位置
-    # width = (bins[1] - bins[0]) / 4  # 使得三个柱子在一个bin内紧密相邻，但是不同bin之间有空隙
+    with open("best_eval.txt", "a", encoding="utf-8") as f:
+        f.write(f"\nBranch: {args.branch}\n")
+        f.write(f"Network File: {args.network_file}\n")
+        f.write(f"Seed: {seed}\n")
+        f.write(f"Threshold: {metrics_dict['threshold']}\n")
+        f.write(f"F-score: {metrics_dict['f1']}\n")
+        f.write(f"Recall: {metrics_dict['recall']}\n")
+        f.write(f"Precision: {metrics_dict['precision']}\n")
+        f.write(f"AUC: {metrics_dict['auc']}\n")
+        f.write(f"AUPR: {metrics_dict['aupr']}\n")
+
+    return metrics_dict
 
 
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("--test_data", type=str, default="new_bp_test_plddt.pkl")
+    parser.add_argument("--branch", type=str, default="bp")
+    parser.add_argument("--network_file", type=str, default="network")
+    parser.add_argument("--labels_num", type=int, default=809)
+    parser.add_argument("--label_network", type=str, default="bp_label_network.dgl")
+    parser.add_argument("--num_layers", type=int, default=3)
+    parser.add_argument("--dropout", type=float, default=0.5)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--learningrate", type=float, default=1e-4)
+    parser.add_argument("--seeds", type=int, default=3)
 
-    # # 手动计算每组数据的直方图
-    # hist_data1, _ = np.histogram(f_score, bins=bins)
-    # hist_data2, _ = np.histogram(auc_values, bins=bins)
-    # hist_data3, _ = np.histogram(aupr_values, bins=bins)
+    args = parser.parse_args()
+    args.seeds = list(range(args.seeds))
 
-    # # 为每组数据设置中心点位置
-    # centers = [(bins[i] + bins[i+1]) / 2 for i in range(len(bins)-1)]
-    # centers1 = [center - width for center in centers]
-    # centers2 = centers
-    # centers3 = [center + width for center in centers]
+    all_metrics = []
+    for run_idx, seed in enumerate(args.seeds):
+        try:
+            metrics = run_test(args, seed, write_supplementary=(run_idx == 0))
+            all_metrics.append(metrics)
+        except Exception as e:
+            print(f"Seed {seed} failed: {e}")
+            import traceback
+            traceback.print_exc()
 
-
-    # # 绘制三组数据的柱状图
-    # plt.bar(centers1, hist_data1, width=width, alpha=0.5, label='f_score', edgecolor='black')
-    # plt.bar(centers2, hist_data2, width=width, alpha=0.5, label='auc_values', edgecolor='black')
-    # plt.bar(centers3, hist_data3, width=width, alpha=0.5, label='aupr_values', edgecolor='black')
-
-    # plt.title('Distribution of BP Test Data Sets')
-    # plt.xlabel('Value')
-    # plt.ylabel('Frequency')
-    # plt.xticks(bins)
-    # plt.legend(loc='upper left')  # 显示图例
-
-    # plt.savefig('histogram3.svg', format='svg')
-
-    # plt.show()
-                
+    if all_metrics:
+        output_dir = ensure_supplementary_dir(args)
+        save_statistics(output_dir, all_metrics)
+        save_results_xlsx(output_dir, all_metrics, args)
