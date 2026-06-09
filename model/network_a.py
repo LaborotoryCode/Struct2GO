@@ -2,37 +2,28 @@ import torch
 import torch.nn
 import torch.nn.functional as F
 import dgl
-import dgl.function as fn
-from dgl.nn import GraphConv, GATConv, AvgPooling, MaxPooling
+from dgl.nn import GraphConv,GATConv, AvgPooling, MaxPooling
 from model.layer import ConvPoolBlock, SAGPool, PLDDTWeightedGAT
-import os
+from model.fusion import CrossAttentionFusion 
 
 
 class GATGOControlNetwork(torch.nn.Module):
-    """Vanilla GatGO-shaped no-information baseline.
 
-    This keeps the same inputs used by vanilla GatGO: graph node features plus
-    sequence features. It intentionally avoids pLDDT, then removes the
-    sample-specific signal before classification so the classifier can only
-    learn dataset-level biases.
-    """
-
-    def __init__(self, in_dim: int, hid_dim: int, out_dim: int, num_layers: int = 3, dropout: float = 0.5):
+    def __init__(self, in_dim:int, hid_dim:int, out_dim:int, num_layers:int=3, dropout: float = 0.5):
 
         super(GATGOControlNetwork, self).__init__()
 
         self.dropout = dropout
-        self.num_layers = num_layers
-
         self.gat_layers = torch.nn.ModuleList([
-            GATConv(in_dim if i == 0 else hid_dim, hid_dim, num_heads=4, feat_drop=0.0,
-                    attn_drop=0.0, residual=False, activation=None, allow_zero_in_degree=True)
-            for i in range(num_layers)
+            GATConv(in_dim, hid_dim, num_heads=4, feat_drop=0.0,
+                    attn_drop=0.0, residual=False, activation=None, allow_zero_in_degree=True),
+            GATConv(hid_dim, hid_dim, num_heads=4, feat_drop=0.0,
+                    attn_drop=0.0, residual=False, activation=None, allow_zero_in_degree=True),
+            GATConv(hid_dim, hid_dim, num_heads=4, feat_drop=0.0,
+                    attn_drop=0.0, residual=False, activation=None, allow_zero_in_degree=True),
         ])
-
-        self.lin1 = torch.nn.Linear(hid_dim + 1024, hid_dim * 2)
-        self.lin2 = torch.nn.Linear(hid_dim * 2, hid_dim)
-        self.lin3 = torch.nn.Linear(hid_dim, out_dim)
+        self.lin1 = torch.nn.Linear(hid_dim, hid_dim)
+        self.lin2 = torch.nn.Linear(hid_dim, out_dim)
 
     def forward(self, graph: dgl.DGLGraph, sequence_feature=None, label_network=None):
         feat = graph.ndata["feature"]
@@ -44,20 +35,9 @@ class GATGOControlNetwork(torch.nn.Module):
 
         graph.ndata["h"] = feat
         graph_feat = dgl.mean_nodes(graph, "h")
-
-        if sequence_feature is None:
-            sequence_feature = torch.zeros(
-                graph_feat.shape[0], 1024, device=graph_feat.device, dtype=graph_feat.dtype
-            )
-
-        final_readout = torch.cat((graph_feat, sequence_feature), dim=-1)
-        #final_readout = final_readout.detach().new_zeros(final_readout.shape)
-
-        feat = F.relu(self.lin1(final_readout))
+        feat = F.relu(self.lin1(graph_feat))
         feat = F.dropout(feat, p=self.dropout, training=self.training)
-        feat = F.relu(self.lin2(feat))
-        return self.lin3(feat)
-
+        return self.lin2(feat)
 
 class GATGONetwork(torch.nn.Module):
 
@@ -68,36 +48,22 @@ class GATGONetwork(torch.nn.Module):
         self.dropout = dropout
         self.num_layers = num_layers
 
-        self.plddt_gat = PLDDTWeightedGAT(in_dim, hid_dim)
-
         self.gat_layers = torch.nn.ModuleList([
-            GATConv(hid_dim, hid_dim, num_heads=4, feat_drop=0.0,
+            GATConv(in_dim if i == 0 else hid_dim, hid_dim, num_heads=4, feat_drop=0.0,
                     attn_drop=0.0, residual=False, activation=None, allow_zero_in_degree=True)
-            for _ in range(num_layers - 1)
+            for i in range(num_layers)
         ])
 
-        # self.gat_layers_noplddt = torch.nn.ModuleList([
-        #     GATConv(in_dim if i == 0 else hid_dim, hid_dim, num_heads=4, feat_drop=0.0,
-        #             attn_drop=0.0, residual=False, activation=None, allow_zero_in_degree=True)
-        #     for i in range(num_layers)
-        # ])
+        self.cross_attn = CrossAttentionFusion(d_model=hid_dim, dropout=dropout)
+        self.seq_proj = torch.nn.Linear(1024, hid_dim)
+        self.struct_proj = torch.nn.Linear(hid_dim, hid_dim)
 
-        self.lin1 = torch.nn.Linear(hid_dim + 1024, hid_dim*2)
-        self.lin2 = torch.nn.Linear(hid_dim*2, hid_dim)
-        self.lin3 = torch.nn.Linear(hid_dim, out_dim)
+        self.lin1 = torch.nn.Linear(hid_dim + 1024, hid_dim * 2)
+        self.lin2 = torch.nn.Linear(hid_dim * 2, hid_dim * 2)
+        self.lin3 = torch.nn.Linear(hid_dim * 2, out_dim)
 
     def forward(self, graph: dgl.DGLGraph, sequence_feature=None, label_network=None):
         feat = graph.ndata["feature"]
-
-        graph.ndata["plddt"] = graph.ndata["plddt"].float()
-        src, dst = graph.edges()
-        graph.edata["weight"] = (
-            (graph.ndata["plddt"][src] + graph.ndata["plddt"][dst]) / 2.0
-        ).float()
-
-        feat = self.plddt_gat(graph, feat)
-        feat = F.relu(feat)
-        feat = F.dropout(feat, p=self.dropout, training=self.training)
 
         for gat in self.gat_layers:
             feat = gat(graph, feat).mean(dim=1)
@@ -105,20 +71,28 @@ class GATGONetwork(torch.nn.Module):
             feat = F.dropout(feat, p=self.dropout, training=self.training)
 
         graph.ndata["h"] = feat
-        graph_feat = dgl.mean_nodes(graph, "h")
+        struct_emb = dgl.mean_nodes(graph, "h")
 
         if sequence_feature is None:
             sequence_feature = torch.zeros(
-                graph_feat.shape[0], 1024, device=graph_feat.device, dtype=graph_feat.dtype
+                struct_emb.shape[0], 1024, device=struct_emb.device, dtype=struct_emb.dtype
             )
 
-        final_readout = torch.cat((graph_feat, sequence_feature), dim=-1)
+        structure_proj = self.struct_proj(struct_emb)
+        sequence_proj = self.seq_proj(sequence_feature)
+
+        fused = 0.5 * structure_proj + 0.5 * sequence_proj
+        fused = fused.unsqueeze(1)
+        sequence_proj = sequence_proj.unsqueeze(1)
+        cross_attn_out = self.cross_attn(fused, sequence_proj)
+        cross_attn_out = cross_attn_out.squeeze(1)
+
+        final_readout = torch.cat((cross_attn_out, sequence_feature), dim=-1)
 
         feat = F.relu(self.lin1(final_readout))
         feat = F.dropout(feat, p=self.dropout, training=self.training)
         feat = F.relu(self.lin2(feat))
         return self.lin3(feat)
-
 
 class SAGNetworkHierarchical(torch.nn.Module):
     """The Self-Attention Graph Pooling Network with hierarchical readout in paper
@@ -136,6 +110,14 @@ class SAGNetworkHierarchical(torch.nn.Module):
     def __init__(self, in_dim:int, hid_dim:int, out_dim:int, num_convs:int=3,
                  pool_ratio:float=0.5, dropout:float=0.5):
         super(SAGNetworkHierarchical, self).__init__()
+
+        #Feature fusion
+        print("hid", hid_dim)
+
+        self.cross_attn = CrossAttentionFusion(d_model=1024, dropout=dropout)#??
+        self.seq_proj = torch.nn.Linear(1024, hid_dim)
+        self.struct_proj = torch.nn.Linear(1024, hid_dim) #You can change the 64
+        self.fusion_gate = torch.nn.Linear(1, hid_dim)
 
         convpools = []
 
@@ -191,18 +173,10 @@ class SAGNetworkHierarchical(torch.nn.Module):
         
 
         #Normal
-        final_readout = torch.cat((final_readout,sequence_feature), -1)
         
-        """
-        # ---- Insert Potential Transformer Encoder here ----
-        # Transformer expects (seq_len, batch_size, feature_dim)
-        tokens = final_readout.unsqueeze(1).transpose(0, 1)  # (1, B, hid_dim_total)
-        tokens = self.transformer_encoder(tokens)           # (1, B, hid_dim_total)
-        tokens = tokens.transpose(0, 1).squeeze(1)          # (B, hid_dim_total)
-        final_readout = tokens
-        # ----------------------------------------
-        """
-
+        final_readout = torch.cat((final_readout,sequence_feature), -1)
+        #con_readout = self.transformer_encoder(final_readout)
+        #final_readout = torch.cat((sequence_feature,con_readout), -1)
         feat = F.relu(self.lin1(final_readout))
         feat = F.dropout(feat, p=self.dropout, training=self.training)
         feat = F.relu(self.lin2(feat))
@@ -274,10 +248,6 @@ class SAGNetworkGlobal(torch.nn.Module):
 def get_sag_network(net_type:str="deepfri"):
     if net_type == "gatgo_control":
         return GATGOControlNetwork
-    elif net_type == "deepfri":
-        return DeepFRINetwork
-    elif net_type == "hierarchical":
-        return SAGNetworkHierarchical
     elif net_type == "global":
         return SAGNetworkGlobal
     else:

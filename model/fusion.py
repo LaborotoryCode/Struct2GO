@@ -15,7 +15,7 @@ class CrossAttentionFusion(nn.Module):
         self.key_proj = nn.Linear(512, d_model)
         self.value_proj = nn.Linear(512, d_model)
 
-        self.out_proj = nn.Linear(1024, 1024) #hid_dim = 512
+        self.out_proj = nn.Linear(d_model, d_model) #hid_dim = 512
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, X_seq, X_struct):
@@ -23,15 +23,19 @@ class CrossAttentionFusion(nn.Module):
 
         #try swapping below
         
-        Q = self.query_proj(X_seq).unsqueeze(1)
-        K = self.key_proj(X_struct).unsqueeze(1)
-        V = self.value_proj(X_struct).unsqueeze(1)
+        """
+        Q = self.query_proj(X_seq)
+        K = self.key_proj(X_struct)
+        V = self.value_proj(X_struct)
+        
         
         """
         Q = self.query_proj(X_struct).unsqueeze(1)
         K = self.key_proj(X_seq).unsqueeze(1)
         V = self.value_proj(X_seq).unsqueeze(1)
-        """
+        
+        
+        
         attn_scores = torch.matmul(Q, K.transpose(-2,-1)) / (Q.size(-1) ** 0.5)
         attn = torch.softmax(attn_scores, dim=-1)
         attn = self.dropout(attn)

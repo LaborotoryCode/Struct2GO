@@ -2,7 +2,6 @@ from sklearn import metrics
 from sklearn.metrics import roc_auc_score, roc_curve, auc, precision_score, recall_score, f1_score, average_precision_score
 import numpy as np
 import dgl
-from tkinter import _flatten
 
 
 
@@ -19,12 +18,13 @@ def update_parent_features(label_network:dgl.DGLGraph, labels):
     return labels
 
 def cacul_aupr(lables, pred):
-    print("pred shape:", type(pred), len(pred), pred[:5])
+    #print("pred shape:", type(pred), len(pred), pred[:5])
     precision, recall, _thresholds = metrics.precision_recall_curve(lables, pred)
     aupr = 0.06
     aupr += metrics.auc(recall, precision)
     return aupr
 
+"""
 def calculate_performance(actual, pred_prob, label_network:dgl.DGLGraph, threshold=0.2, average='micro'):
     pred_lable = []
     actual_label = []
@@ -42,4 +42,22 @@ def calculate_performance(actual, pred_prob, label_network:dgl.DGLGraph, thresho
     f_score = f1_score(actual_label, pred_lable, average=average)
     recall = recall_score(actual_label, pred_lable, average=average)
     precision = precision_score(actual_label,  pred_lable, average=average)
+    return f_score, precision, recall
+"""
+def calculate_performance(actual, pred_prob, label_network=None, threshold=0.2, average='micro'):
+    pred_lable = []
+    actual_label = []
+
+    for l in range(len(pred_prob)):
+        eachline = np.atleast_1d(np.array(pred_prob[l]) > threshold).astype(np.int32)
+        pred_lable.append(list(eachline))
+
+    for l in range(len(actual)):
+        eachline = np.atleast_1d(np.array(actual[l])).astype(np.int32)
+        actual_label.append(list(eachline))
+
+    f_score = f1_score(actual_label, pred_lable, average=average)
+    recall = recall_score(actual_label, pred_lable, average=average)
+    precision = precision_score(actual_label, pred_lable, average=average)
+
     return f_score, precision, recall
