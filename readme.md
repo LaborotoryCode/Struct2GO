@@ -7,7 +7,7 @@ We propose UAX, a novel Uncertainty-Aware Cross Attention Fusion architecture th
 *Figure 1. A graphical representation of the UAX framework*
 
 # Data
-- Formatted Dataset: [UAX_Training_Data](https://drive.google.com/file/d/1NpQLOKgOLk77B0tF5LW8djwZDrutLuj3/view?usp=sharing)
+- Formatted Dataset: [UAX_Training_Data](https://drive.google.com/drive/folders/1MS8J9ZGMf2IHO13DYocK3FtzdizR8tyn?usp=sharing)
 - Protein structure: To download from the [AlphaFold Protein Struct Database](https://alphafold.ebi.ac.uk/download)
 - Protein sequence: To download from the [UniProt website](https://www.uniprot.org/) 
 - Protein annotion: To download from the [GOA website](https://www.ebi.ac.uk/GOA/)
