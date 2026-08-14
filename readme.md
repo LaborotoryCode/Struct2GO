@@ -3,7 +3,7 @@
 We propose UAX, a novel Uncertainty-Aware Cross Attention Fusion architecture that integrates per-token reliability into the fusion process via the attention mechanism using the epistemic confidence score of predicted Local Distance Difference Test (pLDDT).
 
 ![UAX architecture](/model.png)
-*Table 3. Scores from Ablation 3. Bold values indicate the better result between the baseline and UAX methods.*
+*Figure 1. A graphical representation of the UAX framework*
 
 # Data
 - Formatted Dataset: [UAX_Training_Data](https://drive.google.com/file/d/1NpQLOKgOLk77B0tF5LW8djwZDrutLuj3/view?usp=sharing)
