@@ -1,81 +1,49 @@
-# Struct2GO:protein function prediction based on Graph pooling algorithm and AlphaFold2 structure information
+# Uncertainty-Aware Cross Attention Fusion for Improved Protein Function Prediction
 # Abstract
-Struct2GO is a protein function prediction model based on self-attention graph pooling, which utilizes structural information from AlphaFold2 to augment the accuracy and generality of the model's predictions.
-
+We propose UAX, a novel Uncertainty-Aware Cross Attention Fusion architecture that integrates per-token reliability into the fusion process via the attention mechanism using the epistemic confidence score of predicted Local Distance Difference Test (pLDDT).
 
 ![avatar](/model.png)
 
 # Data
-- Protein structure: download from the [AlphaFold Protein Struct Databasee](https://alphafold.ebi.ac.uk/download)
-- Protein sequence: download from the [UniProt website](https://www.uniprot.org/) 
-- Protein annotion: down from the [GOA website](https://www.ebi.ac.uk/GOA/)
-- Gene Ontology: download from the [GO website](http://geneontology.org/)
-  
-We put the processed data for train and test on [there](https://github.com/lyjps/Struct2GO/tree/master/divided_data)\
-We put the Source Data [there](https://github.com/lyjps/Struct2GO/tree/Source_data/Source_data) \
-predicted_struct_protein_data.tar.gz、protein_contact_map.tar.gz、struct_feature.tar.gz supplement [there](https://pan.baidu.com/s/15lyLZ2gMwzop50aUennTPQ?pwd=bcqc)\
-include:
-| File/Folder name                | Description                                              |
-| ------------------------------- | -------------------------------------------------------- |
-| predicted_struct_protein_data   | Alphafold2 predicted human protein 3D structure datasets.|
-| protein_contact_map             | Computed CA-CA protein contact map.                      |
-| struct_feature                  | Protein structural features.                             |
-| dict_sequence_feature           | Protein sequence features.                               |
-| gos_bp.csv                      | GO terms corresponding to all human proteins in the BP branch. |
-| gos_mf.csv                      | GO terms corresponding to all human proteins in the MF branch. |
-| gos_cc.csv                      | GO terms corresponding to all human proteins in the CC branch. |
+- Formatted Dataset: [UAX_Training_Data](https://drive.google.com/file/d/1NpQLOKgOLk77B0tF5LW8djwZDrutLuj3/view?usp=sharing)
+- Protein structure: To download from the [AlphaFold Protein Struct Database](https://alphafold.ebi.ac.uk/download)
+- Protein sequence: To download from the [UniProt website](https://www.uniprot.org/) 
+- Protein annotion: To download from the [GOA website](https://www.ebi.ac.uk/GOA/)
+- Gene Ontology: To download from the [GO website](http://geneontology.org/)
 
-
-# Usage
-## Train the model
-Run the ``run_train.sh`` script directly to train the model(e.g. for MFO)
+# Instructions for usage
+## Training
  ```python
- python run_train.sh
- ``` 
+ python3 run-code.ps1
+ ```
 
-Note: Remember to update the file directory in the script to your local directory if you wish to run the MFO model or the other two models.
-
-## Evaluation the model
-Run the ``run_test.sh`` scirpy directly to evaluation the model(e.g. for MFO)
+## Validation
 ``` python
-python run_test.sh
+python3 run_valid.ps1
 ```
 
-Note: Remember to update the file directory in the script to your local directory if you wish to evaluation the MFO model or the other two models.
+## Models
+### Struct2Go
 
-## Processing raw data
-we provide the proccesed data for training and evaluating directly [there](https://pan.baidu.com/s/1qVr5RuUbg2cDByJMnEVVrw?pwd=uf3s), and then we will explain how to process the raw data.
-### Protein struction data
-- Download protein structure data and convert the three-dimensional atomic structure of proteins into protein contact maps.
-```
-cd ./data_processing
-python predicted_protein_struct2map.py
-```
-- Obtain amino acid residue-level features through the Node2vec algorithm.
-```
-cd ./angel-master/spark-on-angel/example/local/Node2VecExample.scala
-```
-(ps:run it by the IntelLLiJ IDEA )
-```
-cd .data_processing
-python sort.py
-```
+### GAT-Go
 
-### Protein sequence data
-- Download protein sequence data obtain protein sequence features through the Seqvec model.
-```
-cd ./data_processing
-python seq2vec.py
-```
+## Scores
 
-### Fuse protein structure and sequence data and divide the dataset
-```
-cd ./model
-python labels_load.p
-cd ./data_processing
-python divide_data.py
-```
-
+| Model | Ontology | Method | Fmax | AUC | AUPR |
+|:---|:---|:---|---:|---:|---:|
+| Struct2GO | BPO | Baseline | 0.4542 | 0.8704 | 0.4953 |
+| Struct2GO | BPO | **UAX** | **0.4677** | **0.8734** | **0.5039** |
+| Struct2GO | CCO | Baseline | 0.6208 | **0.9354** | 0.6969 |
+| Struct2GO | CCO | **UAX** | **0.6295** | 0.9345 | **0.7043** |
+| Struct2GO | MFO | Baseline | 0.6880 | 0.9701 | 0.7732 |
+| Struct2GO | MFO | **UAX** | **0.7379** | **0.9802** | **0.8293** |
+| GAT-GO | BPO | Baseline | 0.4802 | 0.8762 | 0.5617 |
+| GAT-GO | BPO | **UAX** | **0.4956** | **0.8805** | **0.5827** |
+| GAT-GO | CCO | Baseline | 0.6587 | 0.9410 | 0.7839 |
+| GAT-GO | CCO | **UAX** | **0.6666** | **0.9424** | **0.7930** |
+| GAT-GO | MFO | Baseline | 0.7164 | 0.9617 | 0.8439 |
+| GAT-GO | MFO | **UAX** | **0.7433** | **0.9666** | **0.8692** |
+*Table 3. Scores from Ablation 3. Bold values indicate the better result between the baseline and UAX methods.*
 
 
 
